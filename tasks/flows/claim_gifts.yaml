@@ -1,0 +1,20 @@
+# 领取礼物 · 识图剧本（fast path）
+# 锚点图在 anchors/claim_gifts/，来源：M1 运行截图自动裁剪（零人工打标）
+steps:
+  - name: 点击主页带角标的礼物按钮
+    context: {anchor: home_btn.png, threshold: 0.8}   # 必须在主页，防止在别的页面误判 done_ok
+    find: {anchor: gift_badge_btn.png, threshold: 0.82}
+    no_match: done_ok          # 在主页但没有角标 → 没有可领礼物，幂等完成
+    retry: 2                   # 偶发吞点击，判据不满足自动重点
+    act: click
+    expect: {anchor: gift_page_title.png, threshold: 0.8, max_wait: 10}
+
+  - name: 一键领取循环（直到按钮变灰）
+    loop_click:
+      target: {anchor: claim_all_btn.png, threshold: 0.8}
+      until: {anchor: claim_all_disabled.png, threshold: 0.9}
+      max_times: 8
+
+  - name: 关闭礼物页（右上角 X）
+    coord: [1235, 42]
+    expect: {anchor: home_btn.png, threshold: 0.8, max_wait: 12}

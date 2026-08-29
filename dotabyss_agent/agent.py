@@ -46,11 +46,15 @@ def run_task(
     time_budget: float = 420.0,
     update_knowledge: bool = True,
     log=print,
+    stop_event=None,
+    frame_cb=None,
 ) -> dict:
     """执行单个任务，返回 {"task", "status", "steps", "detail"}。
 
     status: done / failed / blocked / incomplete / error
     blocked = 疑似 403/网络错误，需要人工接手（上层应停止后续所有任务）。
+    stop_event: threading.Event，置位后在下一步边界安全停止。
+    frame_cb: callable(frame)，每步截图回调（GUI 预览用）。
     """
     tid = task["id"]
     run_dir = RUNS_DIR / datetime.now().strftime("%Y%m%d_%H%M%S") / tid
@@ -68,12 +72,20 @@ def run_task(
     repeat_streak = 0
 
     for step in range(1, max_steps + 1):
+        if stop_event is not None and stop_event.is_set():
+            result.update(status="incomplete", detail="用户停止")
+            break
         if time.time() - t0 > time_budget:
             result.update(status="incomplete", detail="时间预算耗尽，可重跑继续")
             break
 
         frame = device.screenshot()
         _save_frame(frame, run_dir, f"step{step:02d}.png")
+        if frame_cb is not None:
+            try:
+                frame_cb(frame)
+            except Exception:
+                pass
 
         if pending_click is not None:
             cx, cy, pre_frame = pending_click
@@ -93,14 +105,6 @@ def run_task(
                         detail="连续 3 次点击无进展（无反应/重复点同一位置），判定卡住中止",
                     )
                     break
-
-    for step in range(1, max_steps + 1):
-        if time.time() - t0 > time_budget:
-            result.update(status="incomplete", detail="时间预算耗尽，可重跑继续")
-            break
-
-        frame = device.screenshot()
-        _save_frame(frame, run_dir, f"step{step:02d}.png")
 
         try:
             action = brain.decide(task["prompt"], knowledge, history, frame)
