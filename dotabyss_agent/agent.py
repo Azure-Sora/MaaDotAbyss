@@ -3,6 +3,7 @@
 上下文管理遵循"任务即回合"：每步只携带 任务定义 + 知识卡 + 最近 N 步文本历史 +
 当前帧截图，探索过程的图像不进历史（自动裁剪）。
 """
+import json
 import time
 from datetime import datetime
 from pathlib import Path
@@ -48,13 +49,15 @@ def run_task(
     log=print,
     stop_event=None,
     frame_cb=None,
+    record: bool = False,
 ) -> dict:
-    """执行单个任务，返回 {"task", "status", "steps", "detail"}。
+    """执行单个任务，返回 {"task", "status", "steps", "detail", "run_dir", "record"}。
 
     status: done / failed / blocked / incomplete / error
     blocked = 疑似 403/网络错误，需要人工接手（上层应停止后续所有任务）。
     stop_event: threading.Event，置位后在下一步边界安全停止。
     frame_cb: callable(frame)，每步截图回调（GUI 预览用）。
+    record: 探索录制——保存每次点击的前帧与坐标（供剧本生成）。
     """
     tid = task["id"]
     run_dir = RUNS_DIR / datetime.now().strftime("%Y%m%d_%H%M%S") / tid
@@ -70,6 +73,8 @@ def run_task(
     prev_click: tuple[int, int] | None = None
     no_prog_streak = 0
     repeat_streak = 0
+    record_list: list[dict] = []
+    frames_dir = run_dir / "frames"
 
     for step in range(1, max_steps + 1):
         if stop_event is not None and stop_event.is_set():
@@ -90,7 +95,10 @@ def run_task(
         if pending_click is not None:
             cx, cy, pre_frame = pending_click
             pending_click = None
-            if device.diff_ratio(pre_frame, frame) >= 0.02:
+            diff = device.diff_ratio(pre_frame, frame)
+            if record_list and record_list[-1]["step"] == step - 1:
+                record_list[-1]["eff"] = round(float(diff), 3)  # 回填上一步点击的效果
+            if diff >= 0.02:
                 no_prog_streak = 0
                 repeat_streak = 0
             else:
@@ -133,6 +141,14 @@ def run_task(
                 history.append(f"step{step}: [坐标越界 ({x},{y})] {thought}")
                 continue
             device.click(x, y)
+            if record:
+                frames_dir.mkdir(parents=True, exist_ok=True)
+                pre_path = frames_dir / f"s{step:02d}_pre.png"
+                Image.fromarray(frame[:, :, ::-1]).save(pre_path)
+                record_list.append({
+                    "step": step, "action": "click", "x": x, "y": y,
+                    "thought": thought, "pre": str(pre_path.relative_to(run_dir)),
+                })
             device.wait_settled(frame)  # 等页面转场平息（慢加载的页面不再重复误点）
             history.append(f"step{step}: 点击({x},{y})｜{thought}")
             pending_click = (x, y, frame)
@@ -182,4 +198,10 @@ def run_task(
 
     if result["status"] == "error" and result["steps"] >= max_steps:
         result.update(status="incomplete", detail="步数上限")
+    result["run_dir"] = str(run_dir)
+    if record:
+        (run_dir / "record.json").write_text(
+            json.dumps(record_list, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+        result["record"] = record_list
     return result

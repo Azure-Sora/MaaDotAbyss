@@ -10,9 +10,8 @@ from PIL import Image
 
 from .config import (
     MAX_COMPLETION_TOKENS,
-    MIMO_BASE_URL,
-    MIMO_KEY_PATH,
-    MIMO_MODEL,
+    PROVIDERS,
+    ACTIVE_PROVIDER,
 )
 
 SYSTEM_PROMPT = """你是《DOT ABYSS》(ドットアビスX) 游戏的自动化操作助手，通过截图观察画面并给出下一步操作。
@@ -45,15 +44,18 @@ class BrainError(RuntimeError):
 
 
 class Brain:
-    def __init__(self):
-        key = MIMO_KEY_PATH.read_text(encoding="utf-8-sig").strip()
-        self.client = OpenAI(api_key=key, base_url=MIMO_BASE_URL)
+    def __init__(self, provider: str | None = None):
+        cfg = PROVIDERS[provider or ACTIVE_PROVIDER]
+        key = cfg["key_path"].read_text(encoding="utf-8-sig").strip()
+        self.client = OpenAI(api_key=key, base_url=cfg["base_url"])
+        self.model = cfg["model"]
+        self.provider = provider or ACTIVE_PROVIDER
 
     # ---- 基础调用 -----------------------------------------------------
 
     def _chat(self, content: list, system: str = SYSTEM_PROMPT) -> str:
         resp = self.client.chat.completions.create(
-            model=MIMO_MODEL,
+            model=self.model,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": content},
@@ -133,3 +135,36 @@ class Brain:
             system="你是画面识读助手，只输出一个 JSON 对象，禁止输出其他文字。",
         )
         return self._parse_json(text)
+
+    def select_flow_steps(self, record_lines: list[str]) -> dict:
+        """从探索执行记录中挑选『最短正确路径』的关键点击步骤，并判断探索是否退化。
+
+        record_lines 形如 "step3: click(823,648) eff=0.31｜点击冒险按钮"。
+        退化 = 这次探索没有发生任务的核心动作（领取/战斗/提交等），
+        只是"进入→发现空/不可用→退出"的空走——此时生成的剧本是无效的。
+        模型只做语义挑选与命名；坐标、锚点裁剪由框架完成。
+        """
+        prompt = (
+            "以下是一次游戏任务自动探索的完整执行记录。eff 是该次点击后画面的变化率"
+            "（<0.02 说明点击没生效，多半是试错或误点）。\n"
+            "请完成两件事：\n"
+            "1) 判断这次探索是否『退化』：即没有执行任务的核心动作（领取奖励、打完战斗、"
+            "提交物品等），只是进入界面发现为空/不可用后退出。若是，degenerate=true。\n"
+            "2) 若未退化，选出构成『从起点到任务完成的最短正确路径』的关键点击步骤：\n"
+            "   - 跳过无效点击（eff 很低）、重复尝试中失败的那些、纯等待；\n"
+            "   - 同一目的的多次点击只保留成功生效的那次；按执行顺序输出。\n"
+            '只输出 JSON：{"degenerate": bool, "reason": "一句话说明",\n'
+            '  "steps": [{"ref_step": 步骤号(int), "name": "简短中文名(不超过14字)"}]}\n\n'
+            + "\n".join(record_lines)
+        )
+        data = self._parse_json(
+            self._chat(
+                [{"type": "text", "text": prompt}],
+                system="你是自动化流程分析师，只输出一个 JSON 对象，禁止输出其他文字。",
+            )
+        )
+        return {
+            "degenerate": bool(data.get("degenerate", False)),
+            "reason": str(data.get("reason", "")),
+            "steps": list(data.get("steps", [])),
+        }
