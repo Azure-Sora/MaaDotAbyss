@@ -1,0 +1,18 @@
+# DotAbyss Agent 依赖（Python 3.10+）
+# 安装: pip install -r requirements.txt
+
+# 设备层（MAA 官方 Python 绑定，Win32 控制器）
+MaaFw
+
+# LLM 决策（OpenAI 兼容客户端，MiMo / GLM）
+openai
+
+# 视觉与剧本
+numpy
+opencv-python
+Pillow
+PyYAML
+
+# GUI（选型见 docs/research/10-UI框架选型调研.md）
+PySide6
+PySide6-Fluent-Widgets

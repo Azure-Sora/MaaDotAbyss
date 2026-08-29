@@ -1,3 +1,5 @@
 .local
 _refs/
 *.pyc
+__pycache__/
+poc/*_out/

@@ -25,15 +25,18 @@ def run_selected(
     max_steps: int = 30,
     time_budget: float = 420.0,
     update_knowledge: bool = True,
+    provider: str | None = None,
     log=print,
     stop_event=None,
     frame_cb=None,
+    event_cb=None,
     _device=None,
     _brain=None,
 ) -> list[dict]:
     """按顺序执行指定任务；返回逐任务结果。
 
     blocked（疑似 403）时立即停止后续任务。
+    event_cb: callable(dict)，逐任务结果事件 {"type":"result", ...}，GUI 状态列用。
     """
     all_tasks = {t["id"]: t for t in load_tasks()}
     todo = [all_tasks[i] for i in task_ids if i in all_tasks]
@@ -41,8 +44,16 @@ def run_selected(
         log("没有匹配的任务")
         return []
 
+    def _finish(res: dict):
+        results.append(res)
+        if event_cb is not None:
+            try:
+                event_cb({"type": "result", **res})
+            except Exception:
+                pass
+
     device = _device or GameDevice()
-    brain = _brain or Brain()
+    brain = _brain or Brain(provider=provider)
 
     results = []
     blocked = False
@@ -61,7 +72,7 @@ def run_selected(
             skip, reason = False, f"前置检查异常({e.__class__.__name__})，保守执行"
         if skip:
             log(f"[skipped] {reason}")
-            results.append({"task": t["id"], "status": "skipped", "steps": 0, "detail": reason})
+            _finish({"task": t["id"], "status": "skipped", "steps": 0, "detail": reason})
             continue
         if reason:
             log(f"[precondition] {reason}")
@@ -73,8 +84,8 @@ def run_selected(
             except Exception as e:
                 fr = {"status": "failed", "detail": f"{e.__class__.__name__}: {e}"}
             if fr.get("status") == "done":
-                results.append({"task": t["id"], "status": "done", "steps": fr.get("step", 0),
-                                "detail": f"flow 快跑 {fr.get('seconds', '')}s"})
+                _finish({"task": t["id"], "status": "done", "steps": fr.get("step", 0),
+                         "detail": f"flow 快跑 {fr.get('seconds', '')}s"})
                 continue
             if stop_event is not None and stop_event.is_set():
                 results.append({"task": t["id"], "status": "incomplete", "steps": 0, "detail": "用户停止"})
@@ -92,7 +103,7 @@ def run_selected(
             stop_event=stop_event,
             frame_cb=frame_cb,
         )
-        results.append(r)
+        _finish(r)
         log(f"[{r['status']}] {r['task']} steps={r['steps']} {r['detail']}")
         if r["status"] == "blocked":
             blocked = True

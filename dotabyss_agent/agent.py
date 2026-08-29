@@ -50,6 +50,7 @@ def run_task(
     stop_event=None,
     frame_cb=None,
     record: bool = False,
+    event_cb=None,
 ) -> dict:
     """执行单个任务，返回 {"task", "status", "steps", "detail", "run_dir", "record"}。
 
@@ -57,6 +58,8 @@ def run_task(
     blocked = 疑似 403/网络错误，需要人工接手（上层应停止后续所有任务）。
     stop_event: threading.Event，置位后在下一步边界安全停止。
     frame_cb: callable(frame)，每步截图回调（GUI 预览用）。
+    event_cb: callable(dict)，结构化事件回调（GUI 决策流用）：
+              每步 {"type":"step", task, step, action, detail, thought, frame}。
     record: 探索录制——保存每次点击的前帧与坐标（供剧本生成）。
     """
     tid = task["id"]
@@ -134,6 +137,15 @@ def run_task(
         act = action.get("action")
         thought = str(action.get("thought", ""))
         log(f"step{step}: [{act}] {thought}")
+        if event_cb is not None:
+            try:
+                event_cb({
+                    "type": "step", "task": tid, "step": step, "action": act,
+                    "detail": {k: v for k, v in action.items() if k not in ("thought",)},
+                    "thought": thought, "frame": frame,
+                })
+            except Exception:
+                pass
 
         if act == "click":
             x, y = int(action.get("x", -1)), int(action.get("y", -1))

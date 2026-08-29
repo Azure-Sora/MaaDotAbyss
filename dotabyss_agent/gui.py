@@ -1,182 +1,422 @@
-"""基础 GUI：任务列表 / 实时日志 / 截图预览 / 启停控制。
+"""正经 GUI：PySide6 + QFluentWidgets（Fluent 风，MFW-CFA 同款路线）。
 
 用法: python -m dotabyss_agent.gui
-零第三方 GUI 依赖（tkinter 标准库 + 已装的 pillow）。
+
+页面：
+- 任务：任务勾选、运行参数、启停控制、运行日志
+- 监控：游戏画面实时预览 + LLM 决策流时间线（每步截图/动作/思考）
+
+选型依据见 docs/research/10-UI框架选型调研.md。
 """
 import json
-import queue
+import sys
 import threading
-import tkinter as tk
-from tkinter import scrolledtext, ttk
 
-from PIL import Image, ImageTk
+import numpy as np
+from PySide6.QtCore import QObject, Qt, Signal, QTimer
+from PySide6.QtGui import QFont, QImage, QPixmap
+from PySide6.QtWidgets import QApplication, QHBoxLayout, QLabel, QListWidgetItem, QVBoxLayout, QWidget
+from qfluentwidgets import (
+    BodyLabel,
+    CaptionLabel,
+    CardWidget,
+    ComboBox,
+    DoubleSpinBox,
+    FluentIcon as FIF,
+    FluentWindow,
+    InfoBar,
+    InfoBarPosition,
+    ListWidget,
+    PrimaryPushButton,
+    PushButton,
+    SmoothScrollArea,
+    SpinBox,
+    StrongBodyLabel,
+    TextEdit,
+    Theme,
+    TitleLabel,
+    setTheme,
+)
 
+from .config import ACTIVE_PROVIDER, PROVIDERS
 from .runner import load_tasks, run_selected
 
-PREVIEW_W, PREVIEW_H = 512, 288  # 1280x720 缩放
+PREVIEW_W, PREVIEW_H = 512, 288   # 1280x720 缩放
+THUMB_W, THUMB_H = 160, 90        # 时间线缩略图
+MAX_CARDS = 120                   # 决策流保留步数
+
+ACTION_ZH = {"click": "点击 ", "wait": "等待 ", "wait_stable": "等待画面稳定", "report": "上报 → "}
 
 
-class App:
-    def __init__(self, root: tk.Tk):
-        self.root = root
-        root.title("DotAbyss Agent")
-        root.geometry("1000x680")
+class RunSignals(QObject):
+    """worker 线程 → UI 线程 的全部通路。"""
+    log = Signal(str)
+    frame = Signal(object)          # np.ndarray BGR HxWx3
+    step = Signal(dict)             # {"type":"step", task, step, action, detail, thought, frame}
+    result = Signal(dict)           # {"type":"result", task, status, ...}
+    running = Signal(bool)
 
-        self.log_q: queue.Queue = queue.Queue()
-        self.frame_q: queue.Queue = queue.Queue()
+
+class RunState:
+    """跨页面共享：信号、停止事件、worker 线程。"""
+
+    def __init__(self):
+        self.sig = RunSignals()
         self.stop_event = threading.Event()
         self.worker: threading.Thread | None = None
-        self._photo = None  # 防止 PhotoImage 被回收
 
-        self._build_ui()
-        self._fill_tasks()
-        self._poll()
 
-    # ---- UI 构建 -------------------------------------------------------
+def frame_to_pixmap(frame) -> QPixmap | None:
+    """BGR ndarray → QPixmap（无引用悬挂，Qt 会拷贝像素）。"""
+    if not isinstance(frame, np.ndarray):
+        return None
+    arr = np.ascontiguousarray(frame)
+    img = QImage(arr.data, arr.shape[1], arr.shape[0], arr.shape[1] * 3, QImage.Format_BGR888)
+    return QPixmap.fromImage(img)
 
-    def _build_ui(self):
-        top = ttk.Frame(self.root)
-        top.pack(fill="x", padx=8, pady=6)
-        self.btn_all = ttk.Button(top, text="▶ 运行全部", command=self._run_all)
-        self.btn_sel = ttk.Button(top, text="▶ 运行选中", command=self._run_checked)
-        self.btn_stop = ttk.Button(top, text="■ 停止", command=self._stop, state="disabled")
-        self.btn_all.pack(side="left")
-        self.btn_sel.pack(side="left", padx=6)
-        self.btn_stop.pack(side="left")
-        self.status_var = tk.StringVar(value="待机（游戏需已由人工启动）")
-        ttk.Label(top, textvariable=self.status_var).pack(side="right")
 
-        main = ttk.Frame(self.root)
-        main.pack(fill="both", expand=True, padx=8)
+# ---- 决策流时间线 -------------------------------------------------------
 
-        left = ttk.Frame(main)
-        left.pack(side="left", fill="both", expand=True)
 
-        cols = ("id", "name", "status")
-        self.tree = ttk.Treeview(left, columns=cols, show="headings", height=7)
-        for cid, text, w in [("id", "任务 ID", 180), ("name", "名称", 140), ("status", "状态", 90)]:
-            self.tree.heading(cid, text=text)
-            self.tree.column(cid, width=w, anchor="w")
-        self.tree.pack(fill="x")
+class StepCard(CardWidget):
+    def __init__(self, ev: dict, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(104)
 
-        log_box = ttk.LabelFrame(left, text="日志")
-        log_box.pack(fill="both", expand=True, pady=(6, 0))
-        self.log_text = scrolledtext.ScrolledText(
-            log_box, height=16, state="disabled", font=("Consolas", 9), wrap="word"
+        thumb = QLabel()
+        thumb.setFixedSize(THUMB_W + 8, THUMB_H + 8)
+        thumb.setAlignment(Qt.AlignCenter)
+        thumb.setStyleSheet("background:rgba(128,128,128,0.15); border-radius:4px;")
+        pix = frame_to_pixmap(ev.get("frame"))
+        if pix is not None:
+            thumb.setPixmap(pix.scaled(THUMB_W, THUMB_H, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+
+        act = ev.get("action", "")
+        d = ev.get("detail") or {}
+        if act == "click":
+            desc = f"({d.get('x', '?')}, {d.get('y', '?')})"
+        elif act == "wait":
+            desc = f"{d.get('seconds', 3):g}s"
+        elif act == "report":
+            desc = str(d.get("status", "?"))
+        else:
+            desc = ""
+        title = StrongBodyLabel(f"#{ev.get('step', '?')}  {ACTION_ZH.get(act, act or '?')}{desc}")
+        thought = BodyLabel(str(ev.get("thought", "")))
+        thought.setWordWrap(True)
+
+        right = QVBoxLayout()
+        right.setContentsMargins(0, 0, 0, 0)
+        right.setSpacing(4)
+        right.addWidget(title)
+        right.addWidget(thought)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 8, 12, 8)
+        lay.setSpacing(12)
+        lay.addWidget(thumb, 0, Qt.AlignVCenter)
+        lay.addLayout(right, 1)
+
+
+class MonitorPage(QWidget):
+    """游戏画面预览 + 决策流时间线。"""
+
+    def __init__(self, state: RunState, parent=None):
+        super().__init__(parent)
+        self.setObjectName("monitorPage")
+        self.state = state
+        self._cards: list[StepCard] = []
+        self._placeholder: CaptionLabel | None = None
+
+        self.preview = QLabel("等待画面…")
+        self.preview.setFixedSize(PREVIEW_W, PREVIEW_H)
+        self.preview.setAlignment(Qt.AlignCenter)
+        self.preview.setStyleSheet(
+            "background:rgba(128,128,128,0.12); border-radius:6px; font-size:14px;"
         )
-        self.log_text.pack(fill="both", expand=True)
 
-        right = ttk.LabelFrame(main, text="当前画面")
-        right.pack(side="right", fill="y", padx=(8, 0))
-        self.preview = ttk.Label(right)
-        self.preview.pack(padx=4, pady=4)
+        self.title = StrongBodyLabel("决策流")
+        self.count = CaptionLabel("")
+
+        self.scroll = SmoothScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.scroll.setStyleSheet("QScrollArea{border:none; background:transparent;}")
+        self.timeline_box = QVBoxLayout()
+        self.timeline_box.setSpacing(6)
+        self.timeline_box.setAlignment(Qt.AlignTop)
+        inner = QWidget()
+        inner.setLayout(self.timeline_box)
+        inner.setStyleSheet("background:transparent;")
+        self.scroll.setWidget(inner)
+        self._add_placeholder()
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 24, 24, 12)
+        lay.setSpacing(10)
+        top = QHBoxLayout()
+        top.addWidget(self.preview)
+        top.addStretch(1)
+        lay.addLayout(top)
+
+        head = QHBoxLayout()
+        head.addWidget(self.title)
+        head.addWidget(self.count)
+        head.addStretch(1)
+        lay.addLayout(head)
+        lay.addWidget(self.scroll, 1)
+
+        state.sig.frame.connect(self.set_frame)
+        state.sig.step.connect(self.add_step)
+
+    # ---- 槽 ----
+
+    def set_frame(self, frame):
+        pix = frame_to_pixmap(frame)
+        if pix is None:
+            return
+        self.preview.setPixmap(
+            pix.scaled(PREVIEW_W, PREVIEW_H, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        )
+
+    def add_step(self, ev: dict):
+        self._clear_placeholder()
+        card = StepCard(ev)
+        self._cards.append(card)
+        self.timeline_box.addWidget(card)
+        if len(self._cards) > MAX_CARDS:
+            old = self._cards.pop(0)
+            self.timeline_box.removeWidget(old)
+            old.deleteLater()
+        self.count.setText(f"{len(self._cards)} 步")
+        QTimer.singleShot(0, self._scroll_bottom)
+
+    def reset(self):
+        for c in self._cards:
+            self.timeline_box.removeWidget(c)
+            c.deleteLater()
+        self._cards.clear()
+        self.count.setText("")
+        self._add_placeholder()
+
+    # ---- 内部 ----
+
+    def _add_placeholder(self):
+        self._placeholder = CaptionLabel("运行任务后，每一步的截图、动作与模型思考会按时间排列在这里")
+        self._placeholder.setAlignment(Qt.AlignCenter)
+        self.timeline_box.addWidget(self._placeholder)
+
+    def _clear_placeholder(self):
+        if self._placeholder is not None:
+            self.timeline_box.removeWidget(self._placeholder)
+            self._placeholder.deleteLater()
+            self._placeholder = None
+
+    def _scroll_bottom(self):
+        bar = self.scroll.verticalScrollBar()
+        bar.setValue(bar.maximum())
+
+
+# ---- 任务页 --------------------------------------------------------------
+
+
+class TaskPage(QWidget):
+    def __init__(self, state: RunState, monitor: MonitorPage, parent=None):
+        super().__init__(parent)
+        self.setObjectName("taskPage")
+        self.state = state
+        self.monitor = monitor
+        self._items: dict[str, QListWidgetItem] = {}
+
+        self.status_label = CaptionLabel("待机（游戏需已由人工启动）")
+
+        ctrl = CardWidget()
+        c = QHBoxLayout(ctrl)
+        c.setContentsMargins(16, 10, 16, 10)
+        c.setSpacing(8)
+
+        self.btn_all = PrimaryPushButton(FIF.PLAY, "运行全部")
+        self.btn_sel = PushButton(FIF.PLAY, "运行选中")
+        self.btn_stop = PushButton(FIF.PAUSE, "停止")
+        self.btn_stop.setEnabled(False)
+
+        self.provider = ComboBox()
+        self.provider.addItems(list(PROVIDERS))
+        self.provider.setCurrentText(ACTIVE_PROVIDER)
+        self.max_steps = SpinBox()
+        self.max_steps.setRange(1, 200)
+        self.max_steps.setValue(30)
+        self.budget = DoubleSpinBox()
+        self.budget.setRange(30, 7200)
+        self.budget.setValue(420)
+        self.budget.setDecimals(0)
+        self.budget.setSuffix(" s")
+
+        for w in (self.btn_all, self.btn_sel, self.btn_stop):
+            c.addWidget(w)
+        c.addStretch(1)
+        for label, w in (("模型", self.provider), ("步数上限", self.max_steps), ("时间预算", self.budget)):
+            c.addWidget(BodyLabel(label))
+            c.addWidget(w)
+
+        list_card = CardWidget()
+        lv = QVBoxLayout(list_card)
+        lv.setContentsMargins(12, 8, 12, 8)
+        self.task_list = ListWidget()
+        self._fill_tasks()
+        lv.addWidget(self.task_list)
+
+        log_card = CardWidget()
+        gv = QVBoxLayout(log_card)
+        gv.setContentsMargins(12, 8, 12, 8)
+        self.log_box = TextEdit()
+        self.log_box.setReadOnly(True)
+        self.log_box.setFont(QFont("Consolas", 9))
+        self.log_box.document().setMaximumBlockCount(2000)
+        gv.addWidget(self.log_box)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 24, 24, 12)
+        lay.setSpacing(10)
+        head = QHBoxLayout()
+        head.addWidget(TitleLabel("任务"))
+        head.addStretch(1)
+        head.addWidget(self.status_label)
+        lay.addLayout(head)
+        lay.addWidget(ctrl)
+        lay.addWidget(list_card, 5)
+        lay.addWidget(log_card, 4)
+
+        self.btn_all.clicked.connect(self._run_all)
+        self.btn_sel.clicked.connect(self._run_checked)
+        self.btn_stop.clicked.connect(self._stop)
+        state.sig.log.connect(self.log_box.append)
+        state.sig.result.connect(self._on_result)
+        state.sig.running.connect(self._on_running)
 
     def _fill_tasks(self):
         for t in load_tasks():
-            self.tree.insert("", "end", iid=t["id"], values=(t["id"], t.get("name", ""), "待机"))
+            item = QListWidgetItem(f"{t['id']}   {t.get('name', '')}")
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            item.setData(Qt.UserRole, t["id"])
+            self.task_list.addItem(item)
+            self._items[t["id"]] = item
 
-    # ---- 日志 / 预览队列 ------------------------------------------------
-
-    def log(self, msg: str):
-        self.log_q.put(str(msg))
-
-    def _poll(self):
-        try:
-            while True:
-                msg = self.log_q.get_nowait()
-                if msg == "__DONE__":
-                    self._on_worker_done()
-                    continue
-                self.log_text.config(state="normal")
-                self.log_text.insert("end", msg + "\n")
-                self.log_text.see("end")
-                self.log_text.config(state="disabled")
-        except queue.Empty:
-            pass
-        try:
-            frame = self.frame_q.get_nowait()
-            img = Image.fromarray(frame[:, :, ::-1]).resize((PREVIEW_W, PREVIEW_H))
-            self._photo = ImageTk.PhotoImage(img)
-            self.preview.config(image=self._photo)
-        except queue.Empty:
-            pass
-        self.root.after(120, self._poll)
-
-    # ---- 启停 -----------------------------------------------------------
+    # ---- 启停 ----
 
     def _checked_ids(self) -> list[str]:
-        sel = self.tree.selection()
-        return list(sel) if sel else []
-
-    def _start(self, ids: list[str]):
-        if not ids:
-            self.status_var.set("没有选择任务")
-            return
-        if self.worker and self.worker.is_alive():
-            return
-        self.stop_event.clear()
-        self.btn_stop.config(state="normal")
-        self.btn_all.config(state="disabled")
-        self.btn_sel.config(state="disabled")
-        for tid in ids:
-            self.tree.set(tid, "status", "排队")
-        self.status_var.set(f"运行中: {', '.join(ids)}")
-        self.worker = threading.Thread(target=self._work, args=(ids,), daemon=True)
-        self.worker.start()
+        return [it.data(Qt.UserRole) for it in self._items.values() if it.checkState() == Qt.Checked]
 
     def _run_all(self):
-        self._start([t["id"] for t in load_tasks()])
+        self._start(list(self._items))
 
     def _run_checked(self):
         self._start(self._checked_ids())
 
+    def _start(self, ids: list[str]):
+        if not ids:
+            InfoBar.warning("提示", "没有选择任务（勾选列表项或直接运行全部）",
+                            parent=self, position=InfoBarPosition.TOP, duration=2500)
+            return
+        if self.state.worker and self.state.worker.is_alive():
+            return
+        self.state.stop_event.clear()
+        for tid in ids:
+            self._set_status(tid, "排队")
+        self.monitor.reset()
+        self.status_label.setText(f"运行中：{', '.join(ids)}")
+        args = (ids, self.max_steps.value(), self.budget.value(), self.provider.currentText())
+        self.state.worker = threading.Thread(target=self._work, args=args, daemon=True)
+        self.state.worker.start()
+        self.state.sig.running.emit(True)
+
     def _stop(self):
-        self.stop_event.set()
-        self.status_var.set("停止中（等待当前步结束）…")
+        self.state.stop_event.set()
+        self.status_label.setText("停止中（等待当前步结束）…")
 
-    def _work(self, ids: list[str]):
-        def on_result(r: dict):
-            try:
-                self.tree.set(r["task"], "status", r["status"])
-            except Exception:
-                pass
+    def _work(self, ids, max_steps, budget, provider):
+        s = self.state.sig
 
-        def log_and_mark(msg: str):
-            self.log(msg)
-            # "[状态] task_id steps=..." 形式的结果行 → 更新列表状态列
-            if msg.startswith("[") and "] " in msg:
-                try:
-                    status, rest = msg[1:].split("]", 1)
-                    tid = rest.split(" ")[0].strip()
-                    self.tree.set(tid, "status", status)
-                except Exception:
-                    pass
+        def on_event(ev: dict):
+            if ev.get("type") == "result":
+                s.result.emit(ev)
+            else:
+                s.step.emit(ev)
 
         try:
             results = run_selected(
                 ids,
-                log=log_and_mark,
-                stop_event=self.stop_event,
-                frame_cb=lambda f: self.frame_q.put(f),
+                max_steps=max_steps,
+                time_budget=budget,
+                provider=provider,
+                log=s.log.emit,
+                stop_event=self.state.stop_event,
+                frame_cb=s.frame.emit,
+                event_cb=on_event,
             )
-            self.log("===== 汇总 =====")
-            self.log(json.dumps(results, ensure_ascii=False, indent=1))
-        except Exception as e:  # 设备错误等
-            self.log(f"[异常] {e.__class__.__name__}: {e}")
+            s.log.emit("===== 汇总 =====")
+            s.log.emit(json.dumps(results, ensure_ascii=False, indent=1))
+        except Exception as e:
+            s.log.emit(f"[异常] {e.__class__.__name__}: {e}")
         finally:
-            self.log_q.put("__DONE__")
+            s.running.emit(False)
 
-    def _on_worker_done(self):
-        self.btn_stop.config(state="disabled")
-        self.btn_all.config(state="normal")
-        self.btn_sel.config(state="normal")
-        self.status_var.set("待机")
+    # ---- 状态 ----
+
+    def _on_result(self, r: dict):
+        self._set_status(r.get("task", ""), r.get("status", "?"))
+        if r.get("status") == "blocked":
+            InfoBar.error("已阻塞", "疑似 403/网络错误，请人工检查游戏后再继续",
+                          parent=self, position=InfoBarPosition.TOP, duration=-1)
+
+    def _on_running(self, running: bool):
+        self.btn_all.setEnabled(not running)
+        self.btn_sel.setEnabled(not running)
+        self.btn_stop.setEnabled(running)
+        if not running:
+            self.status_label.setText("待机")
+
+    def _set_status(self, tid: str, status: str):
+        item = self._items.get(tid)
+        if item is None:
+            return
+        base = item.text().split("【")[0]
+        item.setText(f"{base}【{status}】")
+
+
+class MainWindow(FluentWindow):
+    def __init__(self):
+        super().__init__()
+        self.state = RunState()
+
+        self.monitor = MonitorPage(self.state)
+        self.tasks = TaskPage(self.state, self.monitor)
+
+        self.addSubInterface(self.tasks, FIF.PLAY, "任务")
+        self.addSubInterface(self.monitor, FIF.CAMERA, "监控")
+
+        self.resize(1100, 720)
+        self.setMinimumSize(960, 640)
+        self.setWindowTitle("DotAbyss Agent")
+
+    def closeEvent(self, event):
+        # 运行中关窗：请求停止并断开跨线程信号，避免事件投递到已销毁的控件
+        self.state.stop_event.set()
+        for sig in (self.state.sig.log, self.state.sig.frame, self.state.sig.step,
+                    self.state.sig.result, self.state.sig.running):
+            try:
+                sig.disconnect()
+            except RuntimeError:
+                pass
+        super().closeEvent(event)
 
 
 def main():
-    root = tk.Tk()
-    App(root)
-    root.mainloop()
+    app = QApplication(sys.argv)
+    setTheme(Theme.DARK)
+    w = MainWindow()
+    w.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
