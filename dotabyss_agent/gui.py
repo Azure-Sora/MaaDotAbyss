@@ -12,6 +12,7 @@ import json
 import queue
 import sys
 import threading
+import time
 
 import numpy as np
 from PySide6.QtCore import QObject, Qt, Signal, QTimer
@@ -58,6 +59,7 @@ class RunSignals(QObject):
     running = Signal(bool)
     chat = Signal(dict)             # 教学模式 {"type":"chat","role","text"}
     tstate = Signal(str)            # 教学模式状态机 auto/awaiting/distilling/done
+    think = Signal(dict)            # 教学模式 {"phase":"start"/"done","tokens":int|None}
 
 
 class RunState:
@@ -410,6 +412,11 @@ class Bubble(QLabel):
         self.role = role
         self.setWordWrap(True)
         self.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        # 关键：换行 QLabel 必须开启 heightForWidth，否则布局按单行高度分配，
+        # 文字会溢出气泡背景（实测教学页裁字的原因）
+        sp = self.sizePolicy()
+        sp.setHeightForWidth(True)
+        self.setSizePolicy(sp)
         if role == "user":
             self.setMaximumWidth(560)
             self.setAlignment(Qt.AlignRight)
@@ -532,6 +539,11 @@ class TeachPage(QWidget):
         state.sig.tstate.connect(self._on_state)
         state.sig.step.connect(self._on_step)
         state.sig.result.connect(self._on_result)
+        state.sig.think.connect(self._on_thinking)
+        self._think_bubble: Bubble | None = None
+        self._think_timer = QTimer(self)
+        self._think_timer.timeout.connect(self._tick_thinking)
+        self._think_t0 = 0.0
         self._set_running(False)
 
     # ---- 槽 ----
@@ -563,6 +575,34 @@ class TeachPage(QWidget):
         if state == "awaiting":
             self.in_msg.setFocus()
 
+    # ---- 思考占位符（避免长决策时看似卡死） ----
+
+    def _on_thinking(self, ev: dict):
+        if ev.get("phase") == "start":
+            self._think_bubble = self._add_bubble("step", "🤔 思考中… 0.0s")
+            self._think_t0 = time.monotonic()
+            self._think_timer.start(100)
+        else:
+            self._think_timer.stop()
+            if self._think_bubble is not None:
+                tokens = ev.get("tokens")
+                quant = f"{tokens} tokens" if tokens else "（无用量数据）"
+                try:
+                    self._think_bubble.setText(
+                        f"🤔 思考完成 · {quant} · {time.monotonic() - self._think_t0:.1f}s")
+                except RuntimeError:
+                    pass  # 气泡已被滚出上限清理
+                self._think_bubble = None
+
+    def _tick_thinking(self):
+        if self._think_bubble is None:
+            self._think_timer.stop()
+            return
+        try:
+            self._think_bubble.setText(f"🤔 思考中… {time.monotonic() - self._think_t0:.1f}s")
+        except RuntimeError:
+            self._think_timer.stop()
+
     def _on_result(self, r: dict):
         # 教学会话的 result 带 task_card（日常任务的没有），据此区分
         if "task_card" not in r:
@@ -586,6 +626,21 @@ class TeachPage(QWidget):
                             parent=self, position=InfoBarPosition.TOP, duration=4000)
 
     # ---- 会话控制 ----
+
+    def _dispatch(self, ev: dict):
+        """worker 线程事件 → 对应信号（跨线程投递）。"""
+        s = self.state.sig
+        t = ev.get("type")
+        if t == "chat":
+            s.chat.emit(ev)
+        elif t == "state":
+            s.tstate.emit(ev.get("state", ""))
+        elif t == "thinking":
+            s.think.emit(ev)
+        elif t == "result":
+            s.result.emit(ev)
+        else:
+            s.step.emit(ev)
 
     def _start(self):
         tid = self.in_id.text().strip()
@@ -631,12 +686,7 @@ class TeachPage(QWidget):
                 log=s.log.emit,
                 stop_event=self.state.stop_event,
                 frame_cb=s.frame.emit,
-                event_cb=lambda ev: (
-                    s.chat.emit(ev) if ev.get("type") == "chat"
-                    else s.tstate.emit(ev.get("state", "")) if ev.get("type") == "state"
-                    else s.result.emit(ev) if ev.get("type") == "result"
-                    else s.step.emit(ev)
-                ),
+                event_cb=self._dispatch,
                 reply_get=self.reply_q.get,
             )
         except Exception as e:
@@ -667,9 +717,9 @@ class TeachPage(QWidget):
 
     # ---- 气泡 ----
 
-    def _add_bubble(self, role: str, text: str):
+    def _add_bubble(self, role: str, text: str) -> Bubble:
         if not text:
-            return
+            return None
         b = Bubble(role, text)
         self._bubbles.append(b)
         if role == "user":
@@ -687,6 +737,7 @@ class TeachPage(QWidget):
             old = self._bubbles.pop(0)
             (old._holder if hasattr(old, "_holder") else old).deleteLater()
         QTimer.singleShot(0, self._scroll_bottom)
+        return b
 
     def _clear_chat(self):
         for b in self._bubbles:
@@ -720,7 +771,7 @@ class MainWindow(FluentWindow):
         self.state.stop_event.set()
         for sig in (self.state.sig.log, self.state.sig.frame, self.state.sig.step,
                     self.state.sig.result, self.state.sig.running,
-                    self.state.sig.chat, self.state.sig.tstate):
+                    self.state.sig.chat, self.state.sig.tstate, self.state.sig.think):
             try:
                 sig.disconnect()
             except RuntimeError:

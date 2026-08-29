@@ -114,9 +114,9 @@ def run_teach_session(
                     repeat_streak = 0
                     continue
 
+        _emit(event_cb, {"type": "thinking", "phase": "start"})
         try:
             action = brain.decide_teach(goal, instructions, history, frame)
-            parse_errors = 0
         except BrainError as e:
             parse_errors += 1
             history.append(f"step{step}: [解析失败 {e}]")
@@ -129,6 +129,10 @@ def run_teach_session(
             log(f"step{step}: [API 异常] {e}")
             time.sleep(5)
             continue
+        finally:
+            _emit(event_cb, {"type": "thinking", "phase": "done",
+                             "tokens": getattr(brain, "last_completion_tokens", None)})
+        parse_errors = 0
 
         act = action.get("action")
         thought = str(action.get("thought", ""))

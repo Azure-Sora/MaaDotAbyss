@@ -74,6 +74,7 @@ class Brain:
             ],
             max_completion_tokens=MAX_COMPLETION_TOKENS,
         )
+        self.last_completion_tokens = getattr(resp.usage, "completion_tokens", None)
         return resp.choices[0].message.content or ""
 
     @staticmethod

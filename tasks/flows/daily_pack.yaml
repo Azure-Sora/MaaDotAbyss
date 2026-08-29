@@ -1,0 +1,66 @@
+name: 每日免费礼包
+steps:
+- name: 点击底部商店按钮
+  find:
+    anchor: s1.png
+    threshold: 0.94
+  retry: 2
+  act: click
+  expect:
+    change_above: 0.03
+- name: 进入Shop页面
+  find:
+    anchor: s2.png
+    threshold: 0.94
+  retry: 2
+  act: click
+  expect:
+    change_above: 0.03
+- name: 进入超值礼包分类
+  find:
+    anchor: s3.png
+    threshold: 0.94
+  retry: 2
+  act: click
+  expect:
+    change_above: 0.03
+- name: 切换到每日页签
+  find:
+    anchor: s5.png
+    threshold: 0.94
+  retry: 2
+  act: click
+  expect:
+    change_above: 0.03
+- name: 点击免费礼包购买
+  find:
+    anchor: s6.png
+    threshold: 0.94
+  retry: 2
+  act: click
+  expect:
+    change_above: 0.03
+- name: 确认购买礼包
+  find:
+    anchor: s7.png
+    threshold: 0.94
+  retry: 2
+  act: click
+  expect:
+    change_above: 0.03
+- name: 点击OK领取奖励
+  find:
+    anchor: s8.png
+    threshold: 0.94
+  retry: 2
+  act: click
+  expect:
+    change_above: 0.03
+- name: 返回主页
+  find:
+    anchor: s10.png
+    threshold: 0.94
+  retry: 2
+  act: click
+  expect:
+    change_above: 0.03
