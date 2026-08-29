@@ -1,2 +1,3 @@
 .local
-_refs/
+_refs/__pycache__/
+*.pyc
