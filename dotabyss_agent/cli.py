@@ -73,6 +73,61 @@ def _explore(args) -> int:
     return 1
 
 
+def _teach(args) -> int:
+    """交互式新建任务（教学模式）。终端里输入指示；/done 完成；/abort 中止。"""
+    import queue
+    import threading
+
+    from .brain import Brain
+    from .device import DeviceError, GameDevice
+    from .teach import run_teach_session
+
+    try:
+        device = GameDevice()
+    except DeviceError as e:
+        print(f"[设备错误] {e}")
+        return 1
+    brain = Brain(provider=args.provider)
+    print(f"[teach] 使用模型: {brain.provider}/{brain.model}")
+    device.bring_to_front()
+
+    q: queue.Queue = queue.Queue()
+
+    def reader():
+        while True:
+            try:
+                text = input()
+            except EOFError:
+                q.put({"kind": "abort", "text": ""})
+                return
+            t = text.strip()
+            if t == "/done":
+                q.put({"kind": "finish", "text": ""})
+            elif t == "/abort":
+                q.put({"kind": "abort", "text": ""})
+            else:
+                q.put({"kind": "msg", "text": text})
+
+    threading.Thread(target=reader, daemon=True).start()
+
+    def on_event(ev: dict):
+        if ev.get("type") == "chat":
+            role = {"agent": "模型", "user": "你", "system": "系统"}.get(ev.get("role"), "?")
+            print(f"[{role}] {ev.get('text', '')}")
+        elif ev.get("type") == "state":
+            print(f"-- 状态: {ev.get('state')} --")
+
+    r = run_teach_session(
+        args.task_id, args.name or args.task_id, args.goal, device, brain,
+        event_cb=on_event, reply_get=q.get,
+    )
+    print(f"[teach] 结果: [{r['status']}] {r['detail']}（{r['steps']} 步）")
+    if r.get("task_card"):
+        import json as _json
+        print(_json.dumps(r["task_card"], ensure_ascii=False, indent=1))
+    return 0 if r["status"] == "distilled" else 1
+
+
 def main():
     ap = argparse.ArgumentParser(prog="dotabyss-agent")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -91,6 +146,11 @@ def main():
     p_exp.add_argument("--max-steps", type=int, default=25)
     p_exp.add_argument("--time-budget", type=float, default=360.0)
     p_exp.add_argument("--provider", type=str, default=None, help="覆盖默认模型供给 (mimo/glm)")
+    p_teach = sub.add_parser("teach", help="交互式新建任务：模型探索+你对话指导，完成后蒸馏入库")
+    p_teach.add_argument("task_id")
+    p_teach.add_argument("goal", help="一句话目标")
+    p_teach.add_argument("--name", type=str, default="", help="任务名（默认=ID）")
+    p_teach.add_argument("--provider", type=str, default=None, help="覆盖默认模型供给 (mimo/glm)")
     args = ap.parse_args()
 
     if args.cmd == "list":
@@ -100,6 +160,9 @@ def main():
 
     if args.cmd == "explore":
         sys.exit(_explore(args))
+
+    if args.cmd == "teach":
+        sys.exit(_teach(args))
 
     if args.cmd == "run":
         ids = [args.task_id]

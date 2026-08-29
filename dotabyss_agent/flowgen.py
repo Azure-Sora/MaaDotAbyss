@@ -95,7 +95,11 @@ def generate_flow(task: dict, brain: Brain, run_dir: Path, flow_id: str, log=pri
         f"step{r['step']}: click({r['x']},{r['y']}) eff={r.get('eff', '?')}｜{r.get('thought', '')}"
         for r in clicks
     ]
-    picked = brain.select_flow_steps(lines)
+    verdict = brain.select_flow_steps(lines)
+    picked = verdict.get("steps", []) if isinstance(verdict, dict) else (verdict or [])
+    if isinstance(verdict, dict) and verdict.get("degenerate"):
+        log(f"[flowgen] 探索退化（{verdict.get('reason', '')}），不生成剧本")
+        return None
     if not picked:
         log("[flowgen] 模型未选出关键步骤")
         return None

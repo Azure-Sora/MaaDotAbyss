@@ -38,6 +38,18 @@ SYSTEM_PROMPT = """你是《DOT ABYSS》(ドットアビスX) 游戏的自动化
 {"thought": "一句话推理", "action": "wait_stable", "timeout": 120, "reason": "等待战斗结束/加载完成（画面静止后自动返回）"}
 {"thought": "一句话推理", "action": "report", "status": "done或failed或blocked", "detail": "说明", "evidence": "画面上可见的完成/失败证据"}"""
 
+# 教学模式（docs/research/11）：在基础规则之上追加人机协作规则
+TEACH_ADDENDUM = """
+
+【教学模式附加规则】用户正在实时指导你探索并录制一个新任务，用户输入的指示是最高优先级信息。
+- 新动作 ask_user：当你无法从当前画面与已有指示中确定下一步时使用。必须附上你的猜测，让用户确认即可，不要开放式提问：
+{"thought": "一句话推理", "action": "ask_user", "question": "一句话问题", "guess": "我的猜测：应该点X"}
+- report 只用于 status="blocked"（403/网络错误）；不要 report done——任务是否完成由用户宣布。
+- 用户中途插入的指示往往是对前一步的纠正，永远优先遵照最新指示。
+- 教学期的每次点击都会被录制为自动化素材：点准，不做无意义试错。"""
+
+TEACH_SYSTEM_PROMPT = SYSTEM_PROMPT + TEACH_ADDENDUM
+
 
 class BrainError(RuntimeError):
     pass
@@ -100,6 +112,53 @@ class Brain:
                         "（action 为 click/wait/wait_stable/report 之一），不要任何其他文字。",
             }]
             return self._parse_json(self._chat(retry))
+
+    def decide_teach(self, goal: str, instructions: list[str], history: list[str], frame_bgr: np.ndarray) -> dict:
+        """教学模式决策：目标 + 用户全部指示（即任务规格，永不裁剪）+ 近几步历史 + 当前帧。"""
+        lines = [f"# 任务目标\n{goal}"]
+        if instructions:
+            lines.append(
+                "# 用户指示（按时间顺序，最新的最优先，全部有效）\n"
+                + "\n".join(f"- {m}" for m in instructions)
+            )
+        if history:
+            lines.append("# 最近步骤（已裁剪）\n" + "\n".join(history))
+        lines.append("# 当前画面\n给出下一步 JSON（action 可为 click/wait/wait_stable/ask_user；仅网络错误才 report blocked）。")
+        content = [{"type": "text", "text": "\n\n".join(lines)}, self._image_part(frame_bgr)]
+        try:
+            return self._parse_json(self._chat(content, system=TEACH_SYSTEM_PROMPT))
+        except BrainError:
+            retry = content + [{
+                "type": "text",
+                "text": "你上一次的输出无法解析为 JSON。请严格只输出一个 JSON 对象"
+                        "（action 为 click/wait/wait_stable/ask_user/report 之一），不要任何其他文字。",
+            }]
+            return self._parse_json(self._chat(retry, system=TEACH_SYSTEM_PROMPT))
+
+    def summarize_session(self, task_name: str, goal: str, dialogue: list[str], record_lines: list[str]) -> dict:
+        """教学会话蒸馏：用户对话（意图原始记录）+ 执行轨迹 → 任务三件套的规格。"""
+        prompt = (
+            f"# 新建任务：{task_name}\n\n# 用户最初目标\n{goal}\n\n"
+            "# 教学过程中的用户发言（含纠正与补充，是任务意图的原始记录）\n"
+            + "\n".join(dialogue or ["（无——用户只给了初始目标）"]) + "\n\n"
+            "# 模型实际执行的步骤（eff=点击后画面变化率，低值为试错，规格中应忽略）\n"
+            + "\n".join(record_lines) + "\n\n"
+            "请提炼该任务的规格，只输出 JSON：\n"
+            '{"prompt": "给未来自动化执行的任务指令：写清去哪里、点什么、遇到弹窗/异常怎么处理，'
+            '风格与日常任务的 prompt 一致；以用户发言为准，剔除试错步骤",\n'
+            '  "exit_condition": "完成的画面判据（哪个界面/什么状态可见）",\n'
+            '  "notes": ["给未来 LLM 兜底接管的注意事项，1~6 条"]}'
+        )
+        text = self._chat(
+            [{"type": "text", "text": prompt}],
+            system="你是自动化流程分析师，只输出一个 JSON 对象，禁止输出其他文字。",
+        )
+        data = self._parse_json(text)
+        return {
+            "prompt": str(data.get("prompt", goal)),
+            "exit_condition": str(data.get("exit_condition", "")),
+            "notes": [str(x) for x in data.get("notes", [])][:6],
+        }
 
     def verify(self, task_prompt: str, exit_condition: str, frame_bgr: np.ndarray) -> tuple[bool, str]:
         """完成验证：用一张新鲜截图独立判断是否满足退出条件（与决策请求分离）。"""
