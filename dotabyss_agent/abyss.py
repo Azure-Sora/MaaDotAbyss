@@ -1,23 +1,24 @@
 """深渊自动刷装备控制器（docs/research/12）。
 
-三权分立：识读=锚点模板（tasks/flows/anchors/abyss/）+ LLM 兜底；
-规划=abyss_plan 纯函数（已单测）；执行=device（click/swipe/wait_stable）。
+三权分立：识读=桥 UI 直读（abyss_ui，首选）/锚点模板（MAA 兜底）+ LLM 兜底；
+规划=abyss_plan 纯函数（已单测）；执行=device（桥 click/click_ui/click_by_path）。
 
-候选制读图：箭头/光圈标记当前可进入房间（已实测确认），免拓扑免全图拼接；
-候选被屏幕边缘裁切时定向拖半屏补读（swipe 灵敏度 0.72，松手不弹回）。
-
-实机联调待办（锚点素材齐 + 游戏在深渊页时可调）：
-- HUD 数字（侵蚀/层数/钥匙）识别 → 账本对账
-- 战斗序列（AUTO/倍速/结算收取）与日常任务共用，接线即可
-- buff 弹窗/事件弹窗的 LLM 结构化读取 prompt
+实机已验证（2026-08-30，doc 13 §2.7）：
+- 场景链 Nether(地图) → ExplorationBattle(战斗，自动跑) → ExplorarionNetherResult(结算)
+- 结算流：深渊代码三选一弹窗（精英/Boss 掉落）→ 探索報酬页「確認して次へ」（非 Button，
+  射线点击）→ Button_Next → 回 Nether
+- HUD（层数/侵蚀/钥匙/金币）全在 UICanvas 文本节点，对账零 OCR
+- 拿码后结算页明写颜色系统（"リスクコード系統の…"）——颜色注册表的自证来源
 """
+import json
+import re
 import time
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-from .abyss_plan import AbyssLedger, Candidate, pick_room, ticket_decision
+from .abyss_plan import AbyssLedger, Candidate, pick_code, pick_room, ticket_decision
 from .config import TASKS_DIR
 from .flow import match_anchor
 
@@ -100,13 +101,12 @@ def enter_room(device, room: Candidate) -> None:
 
 
 def resolve_room(device, room: Candidate, led: AbyssLedger, brain, log=print) -> None:
-    """按类型解决房间并更新账本。战斗类=开自动挂机；其余=锚点+LLM 兜底。"""
+    """按类型解决房间并更新账本。战斗类=等自动战斗+结算流（含代码弹窗）。
+    层数统一在这里 +1（进房即推进；事件内置的战斗不再多加）。"""
     if room.type in ("battle", "elite", "boss"):
-        _run_auto_battle(device, log)          # 与日常任务共用 AUTO/倍速锚点（接线 TODO）
         led.hp_lost_pct = 0                    # 战斗回满，HP 预算清零
-        led.floor += 1
-        return
-    if room.type == "heal":
+        resolve_battle(device, led, brain, log=log)
+    elif room.type == "heal":
         _choose_overlay_option(device, pick_heal_index(led), log)
         led.erosion = max(0, led.erosion - 30)
     elif room.type == "event":
@@ -116,6 +116,168 @@ def resolve_room(device, room: Candidate, led: AbyssLedger, brain, log=print) ->
     elif room.type == "shop":
         _close_shop(device, log)
     led.floor += 1
+
+
+# ---- 战斗/结算流（实测 2026-08-30） ------------------------------------------
+
+# 深渊代码名称 → 颜色（impact黄/rush红/safe蓝/risk紫）。
+# 来源：拿码后结算页明写「XXコード系統の恩恵ゲージ…」——自证后入册；
+# 未知名走 LLM 视觉定色（大方块=颜色种类，小菱形=效果种类，用户纠正 2026-08-30）。
+CODE_COLORS = {
+    "疫壳": "risk",
+}
+
+
+def _scene(device) -> str:
+    return device.ui_tree(max_nodes=10).get("scene", "")
+
+
+def resolve_battle(device, led: AbyssLedger, brain, log=print, timeout: float = 300.0) -> None:
+    """进房后的战斗全流程（房间已由 enter_room 点入）：战斗自动跑 → 等结果
+    → 代码弹窗/报酬页循环 → 回 Nether 地图。"""
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if _scene(device) == "ExplorarionNetherResult":
+            break
+        time.sleep(3.0)
+    else:
+        raise RuntimeError("战斗超时未出结果（场景一直不是 Result）")
+    log(f"  战斗结束（{time.time() - t0:.0f}s），进入结算流")
+    t0 = time.time()
+    while time.time() - t0 < 120:
+        if _scene(device) == "Nether":
+            log("  回到地图")
+            return
+        _result_step(device, led, brain, log=log)
+        time.sleep(1.5)
+    raise RuntimeError("结算流超时未回地图")
+
+
+def _result_step(device, led: AbyssLedger, brain, log=print) -> bool:
+    """结算流的单步：代码弹窗 > 结算按钮 > 射线连点。返回是否有动作。"""
+    tree = device.ui_tree(max_nodes=12000)
+    def walk(n):
+        yield n
+        for c in n.get("children", []):
+            yield from walk(c)
+    # 1) 深渊代码三选一弹窗
+    for c0 in tree["canvases"]:
+        for n in walk(c0):
+            if n["name"].startswith("Popup_AbyssCodeSelect"):
+                _handle_code_popup(device, n, led, brain, log=log)
+                return True
+    # 2) 结算按钮（真实 Button）
+    for c0 in tree["canvases"]:
+        for n in walk(c0):
+            if "button" not in n:
+                continue
+            nm = n["name"]
+            if nm in ("Button_Next", "Button_ToExploration", "Button_ToNextQuest") \
+                    and n["button"].get("interactable"):
+                device.click_by_path(n["button"]["path"])
+                log(f"  点击 {nm}")
+                return True
+    # 3) 射线连点（確認して次へ 等非 Button 区域；避开左下撤退区）
+    for x, y in ((640, 660), (1177, 661)):
+        try:
+            p = device.click_ui(x, y)
+        except Exception:
+            continue
+        if "PullOut" in p or "Retreat" in p:   # 铁律：绝不碰撤退
+            raise RuntimeError(f"射线命中撤退按钮 {p}——立即停止")
+        log(f"  射线点击 ({x},{y}) → {p[-40:]}")
+        return True
+    return False
+
+
+def _handle_code_popup(device, popup, led: AbyssLedger, brain, log=print) -> None:
+    """深渊代码三选一：读选项→（注册表/LLM）定色→规划器择取→选+确定。"""
+    def walk(n):
+        yield n
+        for c in n.get("children", []):
+            yield from walk(c)
+    options = []
+    for n in walk(popup):
+        m = re.match(r"Code_(\d)$", n["name"])
+        if not m:
+            continue
+        texts = [(x["name"], (x.get("text") or "").strip()) for x in walk(n)]
+        name = next((t for nm, t in texts if nm == "AbyssCodeName" and t), None)
+        desc = next((t for nm, t in texts if nm == "Text" and len(t) > 12), None)
+        pw = None
+        in_power = False
+        for nm, t in texts:
+            if nm == "TextTitle" and "戦力" in t:
+                in_power = True
+            elif in_power and nm == "Value" and t:
+                pw = t
+                break
+        options.append({"idx": int(m.group(1)), "name": name, "desc": desc, "power": pw,
+                        "screen": n.get("screen"),
+                        "color": CODE_COLORS.get(name) if name else None})
+    options.sort(key=lambda o: o["idx"])
+    if brain is not None:
+        _classify_codes_vision(device, [o for o in options if o["color"] is None], brain, log=log)
+    m = re.search(r"残り\s*(\d+)", json.dumps(
+        [(x.get("text") or "") for x in walk(popup)], ensure_ascii=False))
+    rerolls = int(m.group(1)) if m else 0
+    plan_opts = [{"color": o["color"] or "", "power": int((o["power"] or "0").replace(",", ""))}
+                 for o in options]
+    verb, idx = pick_code(plan_opts, led, rerolls)
+    log(f"  代码弹窗: {[(o['name'], o['color'], o['power']) for o in options]} → {verb}")
+    if verb == "reroll":
+        device.click_by_path(_popup_btn(popup, "Button_Reroll"))
+        return
+    if verb == "skip":
+        device.click_by_path(_popup_btn(popup, "Button_Cancel"))   # 受け取らない
+        return
+    o = options[idx]
+    device.click_by_path(_popup_btn(popup, f"Code_{o['idx']}/AbyssCode_{o['idx']}"))
+    time.sleep(0.8)
+    device.click_by_path(_popup_btn(popup, "Button_Confirm"))
+    color = o["color"] or "unknown"
+    if color in led.buffs:
+        led.buffs[color] += 1
+    log(f"  拿码 {o['name']}（{color}，战力 {o['power']}）")
+
+
+def _popup_btn(popup, suffix: str) -> str:
+    def walk(n):
+        yield n
+        for c in n.get("children", []):
+            yield from walk(c)
+    for n in walk(popup):
+        if "button" in n and n["button"]["path"].endswith(suffix):
+            return n["button"]["path"]
+    raise RuntimeError(f"弹窗内未找到 {suffix}")
+
+
+def _classify_codes_vision(device, options, brain, log=print) -> None:
+    """未知名代码：裁大方块图标 → LLM 定色 → 入注册表。"""
+    if not options:
+        return
+    frame = device.screenshot()
+    for o in options:
+        if not o.get("screen"):
+            continue
+        x0, y0, x1, y1 = o["screen"]
+        crop = frame[y0 + 20:y0 + 170, x0 + 150:x1 - 150]   # 大方块图标区（卡片上部中央）
+        if crop.ndim != 3 or crop.shape[0] < 20 or crop.shape[1] < 20:
+            continue
+        try:
+            data = brain.read_json_from_image(
+                crop,
+                "这是游戏深渊代码（buff）卡片的图标特写。大方块图标的边框/主色代表颜色种类："
+                "黄=impact、红=rush、蓝=safe、紫=risk。只输出 JSON："
+                '{"color": "impact|rush|safe|risk 之一"}')
+            color = str(data.get("color", "")).lower()
+            if color in ("impact", "rush", "safe", "risk"):
+                o["color"] = color
+                if o["name"]:
+                    CODE_COLORS[o["name"]] = color
+                log(f"  视觉定色: {o['name']} → {color}（已入注册表）")
+        except Exception as e:
+            log(f"  视觉定色失败 {o['name']}: {e.__class__.__name__}")
 
 
 def pick_heal_index(led: AbyssLedger) -> int:

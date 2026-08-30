@@ -1,11 +1,13 @@
-"""深渊地图 UI 直读（BepInEx 桥 v0.2.0+）：MapCanvas → 结构化房间/道路。
+"""深渊地图 UI 直读（BepInEx 桥 v0.2.0+）：MapCanvas → 结构化房间/道路 + HUD 对账。
 
 doc 12 识读层的桥后端实现，实测（2026-08-30）取代模板匹配+横向拖拽扫读：
 - 房间：MapFloor_{Single|Double|Triple}_{Type}(Clone)，类型写在节点名与 StageTitle 文本；
 - 推奨戦力：NetherStageInfo/TextPower（当前不用于决策，留档）；
-- 候选（可进入）= 房间 Button.interactable——箭头/光圈的游戏态本体，且**屏外房间也可见**
-  （实测下层 4 候选有 2 个在视口外）；
-- 道路：MapRoad_{Light|Fire|Water|Artifact}(Clone)。
+- 候选（可进入）= 房间 Button.interactable——箭头/光圈的游戏态本体，拓扑感知
+  （清完房间后只剩连通房），且**屏外房间也可见**（实测下层 4 候选 2 个在视口外）；
+- 道路：MapRoad_{Light|Fire|Water|Artifact}(Clone)；
+- HUD 全在 UICanvas 文本节点：层数 UI/L/StageName、侵蚀 UI/R/Gauge_Abyss/Value、
+  钥匙 UI/R/..Key/Value、金币 ..Coin/Value——**对账零 OCR**。
 整个 10 层（当前→下一个 Boss）一次全量可得，规划器具备全程已知的前提。
 """
 import re
@@ -77,6 +79,37 @@ def read_map(tree: dict) -> dict:
         if mr:
             roads.append({"elem": mr.group(1), "screen": c.get("screen")})
     return {"rooms": rooms, "roads": roads}
+
+
+def _walk_path(n, base=""):
+    """(node, 相对路径)——HUD 节点按路径匹配（Value 这种名字太通用）。"""
+    p = f"{base}/{n['name']}"
+    yield n, p
+    for c in n.get("children", []):
+        yield from _walk_path(c, p)
+
+
+def read_hud(device) -> dict:
+    """UICanvas HUD → {floor, erosion, keys, coins}（对账用，零 OCR）。"""
+    tree = device.ui_tree(max_nodes=12000)
+    uic = next((c for c in tree.get("canvases", []) if c["name"] == "UICanvas"), None)
+    if uic is None:
+        raise RuntimeError("UICanvas 不存在（当前不在深渊 run 内？）")
+    out: dict = {}
+    for n, p in _walk_path(uic):
+        t = (n.get("text") or "").strip()
+        if not t:
+            continue
+        if n["name"] == "Text" and p.endswith("/StageName/Base/Text"):
+            m = re.search(r"(\d+)", t)
+            out["floor"] = int(m.group(1)) if m else None
+        elif n["name"] == "Value" and "/Gauge_Abyss/" in p:
+            out["erosion"] = int(t)
+        elif n["name"] == "Value" and "/Key/" in p:
+            out["keys"] = int(t.replace(",", ""))
+        elif n["name"] == "Value" and "/Coin/" in p:
+            out["coins"] = int(t.replace(",", ""))
+    return out
 
 
 def read_candidates(device, current_floor: int | None = None, log=print) -> list[Candidate]:

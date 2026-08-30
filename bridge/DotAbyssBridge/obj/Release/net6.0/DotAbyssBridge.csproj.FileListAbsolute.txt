@@ -1,0 +1,12 @@
+E:\Codes\MaaDotAbyss\bridge\DotAbyssBridge\obj\Release\net6.0\DotAbyssBridge.csproj.AssemblyReference.cache
+E:\Codes\MaaDotAbyss\bridge\DotAbyssBridge\obj\Release\net6.0\DotAbyssBridge.GeneratedMSBuildEditorConfig.editorconfig
+E:\Codes\MaaDotAbyss\bridge\DotAbyssBridge\obj\Release\net6.0\DotAbyssBridge.AssemblyInfoInputs.cache
+E:\Codes\MaaDotAbyss\bridge\DotAbyssBridge\obj\Release\net6.0\DotAbyssBridge.AssemblyInfo.cs
+E:\Codes\MaaDotAbyss\bridge\DotAbyssBridge\obj\Release\net6.0\DotAbyssBridge.csproj.CoreCompileInputs.cache
+E:\Codes\MaaDotAbyss\bridge\DotAbyssBridge\bin\Release\net6.0\DotAbyssBridge.deps.json
+E:\Codes\MaaDotAbyss\bridge\DotAbyssBridge\bin\Release\net6.0\DotAbyssBridge.dll
+E:\Codes\MaaDotAbyss\bridge\DotAbyssBridge\bin\Release\net6.0\DotAbyssBridge.pdb
+E:\Codes\MaaDotAbyss\bridge\DotAbyssBridge\obj\Release\net6.0\DotAbyssBridge.dll
+E:\Codes\MaaDotAbyss\bridge\DotAbyssBridge\obj\Release\net6.0\refint\DotAbyssBridge.dll
+E:\Codes\MaaDotAbyss\bridge\DotAbyssBridge\obj\Release\net6.0\DotAbyssBridge.pdb
+E:\Codes\MaaDotAbyss\bridge\DotAbyssBridge\obj\Release\net6.0\ref\DotAbyssBridge.dll
