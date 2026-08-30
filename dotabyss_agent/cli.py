@@ -4,6 +4,10 @@
     python -m dotabyss_agent.cli list
     python -m dotabyss_agent.cli run <task_id> [--max-steps N] [--time-budget 秒]
     python -m dotabyss_agent.cli run-all [--only id1,id2]
+    python -m dotabyss_agent.cli ctl <status|tasks|run|stop|screenshot|logs|quit>
+
+附着模式：GUI 开着时，ctl 命令操作 GUI 进程内的同一引擎（docs/research/13）；
+GUI 未运行时 ctl run 回退为独立直跑，其余 ctl 命令报错提示先开 GUI。
 """
 import argparse
 import json
@@ -128,6 +132,57 @@ def _teach(args) -> int:
     return 0 if r["status"] == "distilled" else 1
 
 
+def _standalone_run(ids: list[str], max_steps: int, time_budget: float,
+                    update_knowledge: bool) -> int:
+    """独立直跑：本进程自建引擎（run/run-all 本体，也是 GUI 未开时 ctl run 的回退）。"""
+    results = run_selected(
+        ids, max_steps=max_steps, time_budget=time_budget, update_knowledge=update_knowledge,
+    )
+    print("\n===== 汇总 =====")
+    print(json.dumps(results, ensure_ascii=False, indent=2))
+    return 0
+
+
+def _ctl(args) -> int:
+    """附着模式：命令发往 GUI 进程内嵌引擎；GUI 未运行时 run 回退独立直跑。"""
+    from . import control
+
+    if args.action == "run":
+        if args.all:
+            ids = [t["id"] for t in load_tasks()]
+        elif args.task_ids:
+            ids = args.task_ids
+        else:
+            print("[ctl] 未指定任务：ctl run <task_id...> 或 --all")
+            return 1
+        params = {"task_ids": ids, "max_steps": args.max_steps,
+                  "time_budget": args.time_budget,
+                  "update_knowledge": not args.no_knowledge_update}
+        if args.provider:
+            params["provider"] = args.provider
+    else:
+        params = {}
+        if args.action == "screenshot" and args.out:
+            params["out"] = args.out
+        elif args.action == "logs":
+            params["tail"] = args.tail
+
+    ok, data = control.ctl_request(args.action, params)
+    if not ok and isinstance(data, dict) and str(data.get("error", "")).startswith("no-engine"):
+        if args.action == "run":
+            print("[ctl] GUI 未运行 → 回退独立直跑（本进程自建引擎，与 GUI 不共享）")
+            return _standalone_run(ids, args.max_steps, args.time_budget,
+                                   not args.no_knowledge_update)
+        print("[ctl] GUI 未运行——先启动: python -m dotabyss_agent.gui")
+        return 1
+    if args.action == "logs" and ok:
+        for line in data.get("lines", []):
+            print(line)
+        return 0
+    print(json.dumps(data, ensure_ascii=False, indent=2))
+    return 0 if ok else 1
+
+
 def main():
     ap = argparse.ArgumentParser(prog="dotabyss-agent")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -151,6 +206,17 @@ def main():
     p_teach.add_argument("goal", help="一句话目标")
     p_teach.add_argument("--name", type=str, default="", help="任务名（默认=ID）")
     p_teach.add_argument("--provider", type=str, default=None, help="覆盖默认模型供给 (mimo/glm)")
+    p_ctl = sub.add_parser("ctl", help="附着到运行中的 GUI 引擎（docs/research/13）")
+    p_ctl.add_argument("action",
+                       choices=["status", "tasks", "run", "stop", "screenshot", "logs", "quit"])
+    p_ctl.add_argument("task_ids", nargs="*", default=[])
+    p_ctl.add_argument("--all", action="store_true")
+    p_ctl.add_argument("--max-steps", type=int, default=30)
+    p_ctl.add_argument("--time-budget", type=float, default=420.0)
+    p_ctl.add_argument("--provider", type=str, default="", help="覆盖默认模型供给 (mimo/glm)")
+    p_ctl.add_argument("--no-knowledge-update", action="store_true")
+    p_ctl.add_argument("--out", type=str, default="", help="screenshot 保存路径")
+    p_ctl.add_argument("--tail", type=int, default=50, help="logs 尾部行数")
     args = ap.parse_args()
 
     if args.cmd == "list":
@@ -164,6 +230,9 @@ def main():
     if args.cmd == "teach":
         sys.exit(_teach(args))
 
+    if args.cmd == "ctl":
+        sys.exit(_ctl(args))
+
     if args.cmd == "run":
         ids = [args.task_id]
     else:
@@ -171,15 +240,10 @@ def main():
         if args.only:
             ids = [s.strip() for s in args.only.split(",")]
 
-    results = run_selected(
-        ids,
-        max_steps=args.max_steps,
-        time_budget=args.time_budget,
-        update_knowledge=not (args.cmd == "run" and args.no_knowledge_update),
-    )
-
-    print("\n===== 汇总 =====")
-    print(json.dumps(results, ensure_ascii=False, indent=2))
+    sys.exit(_standalone_run(
+        ids, args.max_steps, args.time_budget,
+        not (args.cmd == "run" and args.no_knowledge_update),
+    ))
 
 
 if __name__ == "__main__":

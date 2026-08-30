@@ -1,6 +1,8 @@
 """正经 GUI：PySide6 + QFluentWidgets（Fluent 风，MFW-CFA 同款路线）。
 
 用法: python -m dotabyss_agent.gui
+      启动后内嵌控制接口（发现文件 .local/ctl.json），CLI 可用 `ctl` 子命令
+      附着操作同一引擎，见 docs/research/13-控制面与BepInEx桥.md
 
 页面：
 - 任务：任务勾选、运行参数、启停控制、运行日志
@@ -9,10 +11,12 @@
 选型依据见 docs/research/10-UI框架选型调研.md。
 """
 import json
+import os
 import queue
 import sys
 import threading
 import time
+from collections import deque
 
 import numpy as np
 from PySide6.QtCore import QObject, Qt, Signal, QTimer
@@ -41,6 +45,8 @@ from qfluentwidgets import (
 )
 
 from .config import ACTIVE_PROVIDER, PROVIDERS
+from .control import CtlError, ControlServer, SHOTS_DIR, save_frame
+from .device import DeviceError
 from .runner import load_tasks, run_selected
 
 PREVIEW_W, PREVIEW_H = 512, 288   # 1280x720 缩放
@@ -60,15 +66,37 @@ class RunSignals(QObject):
     chat = Signal(dict)             # 教学模式 {"type":"chat","role","text"}
     tstate = Signal(str)            # 教学模式状态机 auto/awaiting/distilling/done
     think = Signal(dict)            # 教学模式 {"phase":"start"/"done","tokens":int|None}
+    ctl_call = Signal(object)       # 控制面：HTTP 线程投递到 GUI 线程执行的闭包
 
 
 class RunState:
-    """跨页面共享：信号、停止事件、worker 线程。"""
+    """跨页面共享：信号、停止事件、worker 线程、共享设备。"""
 
     def __init__(self):
         self.sig = RunSignals()
         self.stop_event = threading.Event()
         self.worker: threading.Thread | None = None
+        self.mode: str | None = None            # task / teach（ctl status 用）
+        self.current_ids: list[str] = []
+        self._device = None                     # 进程内唯一 MAA 控制器（懒创建）
+
+    def get_device(self):
+        if self._device is None:
+            from .device import GameDevice
+
+            self._device = GameDevice()
+        return self._device
+
+    def has_device(self) -> bool:
+        return self._device is not None
+
+    def drop_device(self) -> None:
+        # 仅在引擎空闲时调用：运行中重建会产生并发双控制器（M0 实测 segfault）
+        self._device = None
+
+    def clear_run(self) -> None:
+        self.mode = None
+        self.current_ids = []
 
 
 def frame_to_pixmap(frame) -> QPixmap | None:
@@ -323,33 +351,40 @@ class TaskPage(QWidget):
         return [it.data(Qt.UserRole) for it in self._items.values() if it.checkState() == Qt.Checked]
 
     def _run_all(self):
-        self._start(list(self._items))
+        self.start(list(self._items), self.max_steps.value(), self.budget.value(),
+                   self.provider.currentText())
 
     def _run_checked(self):
-        self._start(self._checked_ids())
+        self.start(self._checked_ids(), self.max_steps.value(), self.budget.value(),
+                   self.provider.currentText())
 
-    def _start(self, ids: list[str]):
+    def start(self, ids: list[str], max_steps: int, budget: float, provider: str,
+              update_knowledge: bool = True) -> bool:
+        """启动任务（GUI 按钮与 ctl run 共用路径）；忙/空选时提示并返回 False。"""
         if not ids:
             InfoBar.warning("提示", "没有选择任务（勾选列表项或直接运行全部）",
                             parent=self, position=InfoBarPosition.TOP, duration=2500)
-            return
+            return False
         if self.state.worker and self.state.worker.is_alive():
-            return
+            return False
         self.state.stop_event.clear()
+        self.state.mode = "task"
+        self.state.current_ids = list(ids)
         for tid in ids:
             self._set_status(tid, "排队")
         self.monitor.reset()
         self.status_label.setText(f"运行中：{', '.join(ids)}")
-        args = (ids, self.max_steps.value(), self.budget.value(), self.provider.currentText())
+        args = (ids, max_steps, budget, provider, update_knowledge)
         self.state.worker = threading.Thread(target=self._work, args=args, daemon=True)
         self.state.worker.start()
         self.state.sig.running.emit(True)
+        return True
 
     def _stop(self):
         self.state.stop_event.set()
         self.status_label.setText("停止中（等待当前步结束）…")
 
-    def _work(self, ids, max_steps, budget, provider):
+    def _work(self, ids, max_steps, budget, provider, update_knowledge):
         s = self.state.sig
 
         def on_event(ev: dict):
@@ -359,21 +394,25 @@ class TaskPage(QWidget):
                 s.step.emit(ev)
 
         try:
+            device = self.state.get_device()
             results = run_selected(
                 ids,
                 max_steps=max_steps,
                 time_budget=budget,
                 provider=provider,
+                update_knowledge=update_knowledge,
                 log=s.log.emit,
                 stop_event=self.state.stop_event,
                 frame_cb=s.frame.emit,
                 event_cb=on_event,
+                _device=device,
             )
             s.log.emit("===== 汇总 =====")
             s.log.emit(json.dumps(results, ensure_ascii=False, indent=1))
         except Exception as e:
             s.log.emit(f"[异常] {e.__class__.__name__}: {e}")
         finally:
+            self.state.clear_run()
             s.running.emit(False)
 
     # ---- 状态 ----
@@ -659,6 +698,8 @@ class TeachPage(QWidget):
                             position=InfoBarPosition.TOP, duration=2500)
             return
         self.state.stop_event.clear()
+        self.state.mode = "teach"
+        self.state.current_ids = [tid]
         self.reply_q = queue.Queue()
         for w in (self.btn_start, self.in_id, self.in_name, self.in_goal, self.provider):
             w.setEnabled(False)
@@ -675,10 +716,9 @@ class TeachPage(QWidget):
     def _work(self, tid, name, goal, provider):
         s = self.state.sig
         from .brain import Brain
-        from .device import GameDevice
         from .teach import run_teach_session
         try:
-            device = GameDevice()
+            device = self.state.get_device()
             brain = Brain(provider=provider)
             device.bring_to_front()
             run_teach_session(
@@ -693,6 +733,7 @@ class TeachPage(QWidget):
             s.log.emit(f"[教学异常] {e.__class__.__name__}: {e}")
             s.chat.emit({"type": "chat", "role": "system", "text": f"会话异常结束：{e}"})
         finally:
+            self.state.clear_run()
             s.running.emit(False)
             s.tstate.emit("done")
 
@@ -749,6 +790,132 @@ class TeachPage(QWidget):
         bar.setValue(bar.maximum())
 
 
+# ---- 控制面附着（docs/research/13 §1） ------------------------------------
+
+
+def call_in_gui(state: RunState, fn, timeout: float = 5.0):
+    """HTTP 线程借用 GUI 线程执行 fn() 并取回返回值（经 ctl_call 信号投递）。"""
+    q: queue.Queue = queue.Queue()
+
+    def _job():
+        try:
+            q.put(("ok", fn()))
+        except Exception as e:
+            q.put(("err", f"{e.__class__.__name__}: {e}"))
+
+    state.sig.ctl_call.emit(_job)
+    kind, payload = q.get(timeout=timeout)
+    if kind == "err":
+        raise CtlError(payload)
+    return payload
+
+
+class GuiCtlAdapter:
+    """GUI 引擎能力 → ControlServer 命令表。方法在 HTTP 线程执行，
+    碰 Qt 控件的部分经 call_in_gui marshal 到 GUI 线程。"""
+
+    def __init__(self, state: RunState, tasks: TaskPage, window: "MainWindow"):
+        self.state = state
+        self.tasks = tasks
+        self.window = window
+        self._logs: deque[str] = deque(maxlen=800)
+        self._results: list[dict] = []
+        self._lock = threading.Lock()
+        state.sig.log.connect(self._on_log)
+        state.sig.result.connect(self._on_result)
+
+    def routes(self) -> dict:
+        return {
+            "status": self.status, "tasks": self.tasks_list, "run": self.run,
+            "stop": self.stop, "screenshot": self.screenshot,
+            "logs": self.logs, "quit": self.quit,
+        }
+
+    # ---- 命令（HTTP 线程） ----
+
+    def status(self, params: dict) -> dict:
+        running = bool(self.state.worker and self.state.worker.is_alive())
+        with self._lock:
+            results = list(self._results[-20:])
+        return {
+            "running": running,
+            "mode": self.state.mode if running else None,
+            "tasks": list(self.state.current_ids),
+            "game_bound": self.state.has_device(),
+            "pid": os.getpid(),
+            "results": results,
+        }
+
+    def tasks_list(self, params: dict) -> dict:
+        return {"tasks": [
+            {"id": t["id"], "name": t.get("name", ""), "flow": t.get("flow")}
+            for t in load_tasks()
+        ]}
+
+    def run(self, params: dict) -> dict:
+        if self.state.worker and self.state.worker.is_alive():
+            raise CtlError("引擎忙碌（任务/教学进行中），先 ctl stop 或等其结束")
+        known = {t["id"] for t in load_tasks()}
+        ids = list(params.get("task_ids") or [])
+        if params.get("all"):
+            ids = list(known)
+        if not ids:
+            raise CtlError("task_ids 为空（或用 all:true）")
+        unknown = [i for i in ids if i not in known]
+        if unknown:
+            raise CtlError(f"未知任务: {', '.join(unknown)}")
+        provider = params.get("provider") or ACTIVE_PROVIDER
+        if provider not in PROVIDERS:
+            raise CtlError(f"未知 provider: {provider}")
+        max_steps = max(1, int(params.get("max_steps", 30)))
+        budget = max(30.0, float(params.get("time_budget", 420.0)))
+        update_knowledge = bool(params.get("update_knowledge", True))
+        with self._lock:
+            self._results.clear()
+        self.state.sig.log.emit(f"[ctl] run {' '.join(ids)}")
+        call_in_gui(self.state, lambda: self.tasks.start(
+            ids, max_steps, budget, provider, update_knowledge))
+        return {"started": ids, "max_steps": max_steps,
+                "time_budget": budget, "provider": provider}
+
+    def stop(self, params: dict) -> dict:
+        self.state.stop_event.set()
+        self.state.sig.log.emit("[ctl] stop 请求")
+        return {"stopping": True}
+
+    def screenshot(self, params: dict) -> dict:
+        try:
+            img = self.state.get_device().screenshot()
+        except DeviceError as e:
+            # 窗口没了：空闲时丢缓存下次重建；运行中不动（防并发双控制器）
+            if not (self.state.worker and self.state.worker.is_alive()):
+                self.state.drop_device()
+            raise CtlError(str(e))
+        out = params.get("out") or str(SHOTS_DIR / f"shot_{time.strftime('%Y%m%d_%H%M%S')}.png")
+        save_frame(img, out)
+        return {"path": out, "width": int(img.shape[1]), "height": int(img.shape[0])}
+
+    def logs(self, params: dict) -> dict:
+        with self._lock:
+            lines = list(self._logs)
+        return {"lines": lines[-max(1, int(params.get("tail", 50))):]}
+
+    def quit(self, params: dict) -> dict:
+        # 延迟关窗：让本请求的响应先发回客户端
+        call_in_gui(self.state, lambda: QTimer.singleShot(100, self.window.close))
+        return {"quitting": True}
+
+    # ---- 信号收集（GUI 线程） ----
+
+    def _on_log(self, line: str):
+        with self._lock:
+            self._logs.append(line)
+
+    def _on_result(self, r: dict):
+        with self._lock:
+            self._results.append(r)
+
+
 class MainWindow(FluentWindow):
     def __init__(self):
         super().__init__()
@@ -766,12 +933,22 @@ class MainWindow(FluentWindow):
         self.setMinimumSize(960, 640)
         self.setWindowTitle("DotAbyss Agent")
 
+        # 控制面：本进程承载引擎，CLI 经 .local/ctl.json 附着（docs/research/13）
+        self.ctl = GuiCtlAdapter(self.state, self.tasks, self)
+        self.state.sig.ctl_call.connect(lambda fn: fn())
+        self.ctl_server = ControlServer(self.ctl.routes())
+        port = self.ctl_server.start()
+        self.state.sig.log.emit(
+            f"[ctl] 控制接口已启动 127.0.0.1:{port}（发现文件 .local/ctl.json）")
+
     def closeEvent(self, event):
-        # 运行中关窗：请求停止并断开跨线程信号，避免事件投递到已销毁的控件
+        # 先停控制面与运行任务，再断开跨线程信号，避免事件投递到已销毁的控件
+        self.ctl_server.shutdown()
         self.state.stop_event.set()
         for sig in (self.state.sig.log, self.state.sig.frame, self.state.sig.step,
                     self.state.sig.result, self.state.sig.running,
-                    self.state.sig.chat, self.state.sig.tstate, self.state.sig.think):
+                    self.state.sig.chat, self.state.sig.tstate, self.state.sig.think,
+                    self.state.sig.ctl_call):
             try:
                 sig.disconnect()
             except RuntimeError:
