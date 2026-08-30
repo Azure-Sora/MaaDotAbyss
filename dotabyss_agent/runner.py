@@ -103,6 +103,7 @@ def run_selected(
             log=log,
             stop_event=stop_event,
             frame_cb=frame_cb,
+            event_cb=event_cb,
         )
         _finish(r)
         log(f"[{r['status']}] {r['task']} steps={r['steps']} {r['detail']}")

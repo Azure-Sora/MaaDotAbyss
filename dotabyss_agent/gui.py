@@ -21,7 +21,7 @@ from collections import deque
 
 import numpy as np
 from PySide6.QtCore import QObject, Qt, Signal, QTimer
-from PySide6.QtGui import QFont, QImage, QPixmap
+from PySide6.QtGui import QFont, QImage, QPixmap, QTextCursor
 from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidgetItem, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel,
@@ -330,6 +330,11 @@ class TaskPage(QWidget):
         state.sig.log.connect(self.log_box.append)
         state.sig.result.connect(self._on_result)
         state.sig.running.connect(self._on_running)
+        state.sig.think.connect(self._on_thinking)
+        self._think_block = None    # 日志末尾的思考占位行（QTextBlock 句柄，原位刷新）
+        self._think_t0 = 0.0
+        self._think_timer = QTimer(self)
+        self._think_timer.timeout.connect(self._tick_thinking)
 
     def _fill_tasks(self):
         for t in load_tasks():
@@ -393,8 +398,11 @@ class TaskPage(QWidget):
         s = self.state.sig
 
         def on_event(ev: dict):
-            if ev.get("type") == "result":
+            t = ev.get("type")
+            if t == "result":
                 s.result.emit(ev)
+            elif t == "thinking":
+                s.think.emit(ev)
             else:
                 s.step.emit(ev)
 
@@ -433,6 +441,10 @@ class TaskPage(QWidget):
         self.btn_sel.setEnabled(not running)
         self.btn_stop.setEnabled(running)
         if not running:
+            if self._think_timer.isActive():    # 中途停止：占位行落定，不留悬空"思考中"
+                self._think_timer.stop()
+                self._write_think_line("🤔 思考已中断")
+                self._think_block = None
             self.status_label.setText("待机")
 
     def _set_status(self, tid: str, status: str):
@@ -441,6 +453,45 @@ class TaskPage(QWidget):
             return
         base = item.text().split("【")[0]
         item.setText(f"{base}【{status}】")
+
+    # ---- 思考占位行（与教学页气泡同款交互：日志末行原位刷新） ----
+
+    def _on_thinking(self, ev: dict):
+        if self.state.mode != "task":
+            return
+        if ev.get("phase") == "start":
+            self._think_block = None
+            self.log_box.append("🤔 思考中… 0.0s")
+            self._think_block = self.log_box.document().lastBlock()
+            self._think_t0 = time.monotonic()
+            self._think_timer.start(100)
+        else:
+            self._think_timer.stop()
+            tokens = ev.get("tokens")
+            quant = f"{tokens} tokens" if tokens else "（无用量数据）"
+            self._write_think_line(
+                f"🤔 思考完成 · {quant} · {time.monotonic() - self._think_t0:.1f}s")
+            self._think_block = None
+
+    def _tick_thinking(self):
+        if self._think_block is None:
+            self._think_timer.stop()
+            return
+        self._write_think_line(f"🤔 思考中… {time.monotonic() - self._think_t0:.1f}s")
+
+    def _write_think_line(self, text: str):
+        block = self._think_block
+        if block is None or not block.isValid():    # 行被日志上限滚出 → 退化为追加
+            self.log_box.append(text)
+            self._think_block = self.log_box.document().lastBlock()
+            return
+        # 只替换块自身文本：BlockUnderCursor 会连前一块分隔符一起选中，
+        # 删除后块合并、句柄失效（实测退化为一味追加）
+        cursor = QTextCursor(block)
+        cursor.setPosition(block.position(), QTextCursor.MoveAnchor)
+        cursor.setPosition(block.position() + block.length() - 1, QTextCursor.KeepAnchor)
+        cursor.removeSelectedText()
+        cursor.insertText(text)
 
 
 # ---- 深渊页（自动刷装备，docs/research/12） --------------------------------
@@ -853,6 +904,8 @@ class TeachPage(QWidget):
         self._add_bubble(ev.get("role", "system"), str(ev.get("text", "")))
 
     def _on_step(self, ev: dict):
+        if self.state.mode != "teach":
+            return  # 任务/深渊运行中的逐步事件不进教学聊天流
         act = ev.get("action", "")
         d = ev.get("detail") or {}
         if act == "click":
@@ -871,6 +924,8 @@ class TeachPage(QWidget):
     # ---- 思考占位符（避免长决策时看似卡死） ----
 
     def _on_thinking(self, ev: dict):
+        if self.state.mode != "teach":
+            return  # 任务/深渊运行中的思考事件不进教学聊天流
         if ev.get("phase") == "start":
             self._think_bubble = self._add_bubble("step", "🤔 思考中… 0.0s")
             self._think_t0 = time.monotonic()

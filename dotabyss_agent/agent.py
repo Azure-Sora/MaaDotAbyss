@@ -55,6 +55,19 @@ def _save_frame(frame: np.ndarray, run_dir: Path, name: str) -> Path:
     return p
 
 
+def _emit_thinking(event_cb, phase: str, brain=None) -> None:
+    """向 GUI 发思考阶段事件（占位提示用）；失败不影响主流程。"""
+    if event_cb is None:
+        return
+    try:
+        ev = {"type": "thinking", "phase": phase}
+        if phase == "done" and brain is not None:
+            ev["tokens"] = getattr(brain, "last_completion_tokens", None)
+        event_cb(ev)
+    except Exception:
+        pass
+
+
 def run_task(
     task: dict,
     device: GameDevice,
@@ -133,6 +146,7 @@ def run_task(
                     )
                     break
 
+        _emit_thinking(event_cb, "start")
         try:
             action = brain.decide(task["prompt"], knowledge, history, frame)
             parse_errors = 0
@@ -149,6 +163,8 @@ def run_task(
             log(f"step{step}: [API 异常] {e}")
             time.sleep(5)
             continue
+        finally:
+            _emit_thinking(event_cb, "done", brain)
 
         act = action.get("action")
         thought = str(action.get("thought", ""))
@@ -216,7 +232,11 @@ def run_task(
             if status == "done":
                 frame2 = device.screenshot()
                 _save_frame(frame2, run_dir, "verify.png")
-                ok, reason = brain.verify(task["prompt"], task.get("exit_condition", ""), frame2)
+                _emit_thinking(event_cb, "start")
+                try:
+                    ok, reason = brain.verify(task["prompt"], task.get("exit_condition", ""), frame2)
+                finally:
+                    _emit_thinking(event_cb, "done", brain)
                 if ok:
                     if update_knowledge:
                         try:
