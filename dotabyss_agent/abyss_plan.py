@@ -22,11 +22,12 @@ ROOM_WEIGHTS = {"elite": 10.0, "event": 6.0, "battle": 4.0, "treasure": 1.0,
 
 @dataclass
 class Candidate:
-    """地图上一个可进入的房间（箭头/光圈标记的候选）。"""
+    """地图上一个可进入的房间（UI 直读 enterable / 箭头模板兜底）。"""
     type: str      # elite/battle/boss/heal/event/shop/treasure
     x: int
     y: int
     floor: int
+    visible: bool = True   # 屏内可见；False=视口外（桥可按路径直点，模板兜底不可）
 
 
 @dataclass

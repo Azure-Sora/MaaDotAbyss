@@ -43,12 +43,17 @@ def _anchor(name: str) -> np.ndarray:
     return img
 
 
-def read_candidates(device, log=print) -> list[Candidate]:
-    """识别当前屏幕上的候选房间：箭头定位 + 就近标签分类。
+def read_candidates(device, current_floor: int | None = None, log=print) -> list[Candidate]:
+    """识别当前可进入的候选房间。桥后端=UI 直读（首选，屏外候选也可见）；
+    MAA 后端=箭头/标签模板匹配兜底（仅视口内）。"""
+    if hasattr(device, "ui_tree"):
+        from .abyss_ui import read_candidates as ui_read
+        return ui_read(device, current_floor=current_floor, log=log)
+    return read_candidates_anchors(device, log=log)
 
-    箭头标记在候选房间上方，命中箭头后在其下方 30~140px 带内找最近的房间标签。
-    找不到标签的箭头按未知类型（battle 兜底权重）处理。
-    """
+
+def read_candidates_anchors(device, log=print) -> list[Candidate]:
+    """模板匹配兜底：箭头定位 + 就近标签分类（仅视口内候选）。"""
     frame = device.screenshot()
     chev = _anchor("chevron.png")
     labels = {name: _anchor(name) for name in ROOM_LABELS}

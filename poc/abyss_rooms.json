@@ -1,0 +1,1167 @@
+{
+ "rooms": [
+  {
+   "type": "battle",
+   "name_type": "Battle",
+   "title": "戦闘",
+   "power": "67,127",
+   "screen": [
+    -208,
+    354,
+    64,
+    626
+   ],
+   "enterable": true,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Single_Battle(Clone)/Anim/Button"
+  },
+  {
+   "type": "elite",
+   "name_type": "BattleMiniBoss",
+   "title": "強敵",
+   "power": "69,066",
+   "screen": [
+    148,
+    354,
+    420,
+    626
+   ],
+   "enterable": true,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Single_BattleMiniBoss(Clone)/Anim/Button"
+  },
+  {
+   "type": "battle",
+   "name_type": "Battle",
+   "title": "戦闘",
+   "power": "67,127",
+   "screen": [
+    860,
+    354,
+    1132,
+    626
+   ],
+   "enterable": true,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Single_Battle(Clone)/Anim/Button"
+  },
+  {
+   "type": "elite",
+   "name_type": "BattleMiniBoss",
+   "title": "強敵",
+   "power": "69,066",
+   "screen": [
+    1216,
+    354,
+    1488,
+    626
+   ],
+   "enterable": true,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Single_BattleMiniBoss(Clone)/Anim/Button"
+  },
+  {
+   "type": "heal",
+   "name_type": "Recovery",
+   "title": "回復",
+   "power": null,
+   "screen": [
+    148,
+    594,
+    420,
+    866
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Single_Recovery(Clone)/Anim/Button"
+  },
+  {
+   "type": "battle",
+   "name_type": "Battle",
+   "title": "戦闘",
+   "power": "67,127",
+   "screen": [
+    860,
+    594,
+    1487,
+    866
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Double_Battle(Clone)/Anim/Button"
+  },
+  {
+   "type": "event",
+   "name_type": "Event",
+   "title": "イベント",
+   "power": null,
+   "screen": [
+    140,
+    834,
+    1140,
+    1106
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Triple_Event(Clone)/Anim/Button"
+  },
+  {
+   "type": "elite",
+   "name_type": "BattleMiniBoss",
+   "title": "強敵",
+   "power": "69,066",
+   "screen": [
+    -208,
+    1074,
+    64,
+    1346
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Single_BattleMiniBoss(Clone)/Anim/Button"
+  },
+  {
+   "type": "battle",
+   "name_type": "Battle",
+   "title": "戦闘",
+   "power": "67,127",
+   "screen": [
+    148,
+    1074,
+    420,
+    1346
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Single_Battle(Clone)/Anim/Button"
+  },
+  {
+   "type": "battle",
+   "name_type": "Battle",
+   "title": "戦闘",
+   "power": "67,127",
+   "screen": [
+    504,
+    1074,
+    776,
+    1346
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Single_Battle(Clone)/Anim/Button"
+  },
+  {
+   "type": "battle",
+   "name_type": "Battle",
+   "title": "戦闘",
+   "power": "67,127",
+   "screen": [
+    860,
+    1074,
+    1487,
+    1346
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Double_Battle(Clone)/Anim/Button"
+  },
+  {
+   "type": "shop",
+   "name_type": "Shop",
+   "title": "商店",
+   "power": null,
+   "screen": [
+    -207,
+    1314,
+    420,
+    1586
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Double_Shop(Clone)/Anim/Button"
+  },
+  {
+   "type": "shop",
+   "name_type": "Shop",
+   "title": "商店",
+   "power": null,
+   "screen": [
+    860,
+    1314,
+    1132,
+    1586
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Single_Shop(Clone)/Anim/Button"
+  },
+  {
+   "type": "battle",
+   "name_type": "Battle",
+   "title": "戦闘",
+   "power": "67,127",
+   "screen": [
+    -208,
+    1554,
+    64,
+    1826
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Single_Battle(Clone)/Anim/Button"
+  },
+  {
+   "type": "battle",
+   "name_type": "Battle",
+   "title": "戦闘",
+   "power": "67,127",
+   "screen": [
+    148,
+    1554,
+    776,
+    1826
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Double_Battle(Clone)/Anim/Button"
+  },
+  {
+   "type": "battle",
+   "name_type": "Battle",
+   "title": "戦闘",
+   "power": "67,127",
+   "screen": [
+    860,
+    1554,
+    1132,
+    1826
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Single_Battle(Clone)/Anim/Button"
+  },
+  {
+   "type": "treasure",
+   "name_type": "Treasure",
+   "title": "宝箱",
+   "power": null,
+   "screen": [
+    1216,
+    1554,
+    1488,
+    1826
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Single_Treasure(Clone)/Anim/Button"
+  },
+  {
+   "type": "battle",
+   "name_type": "Battle",
+   "title": "戦闘",
+   "power": "67,127",
+   "screen": [
+    148,
+    1794,
+    420,
+    2066
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Single_Battle(Clone)/Anim/Button"
+  },
+  {
+   "type": "battle",
+   "name_type": "Battle",
+   "title": "戦闘",
+   "power": "67,127",
+   "screen": [
+    860,
+    1794,
+    1487,
+    2066
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Double_Battle(Clone)/Anim/Button"
+  },
+  {
+   "type": "event",
+   "name_type": "Event",
+   "title": "イベント",
+   "power": null,
+   "screen": [
+    -208,
+    2034,
+    64,
+    2306
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Single_Event(Clone)/Anim/Button"
+  },
+  {
+   "type": "battle",
+   "name_type": "Battle",
+   "title": "戦闘",
+   "power": "67,127",
+   "screen": [
+    504,
+    2034,
+    776,
+    2306
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Single_Battle(Clone)/Anim/Button"
+  },
+  {
+   "type": "treasure",
+   "name_type": "Treasure",
+   "title": "宝箱",
+   "power": null,
+   "screen": [
+    860,
+    2034,
+    1132,
+    2306
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Single_Treasure(Clone)/Anim/Button"
+  },
+  {
+   "type": "elite",
+   "name_type": "BattleMiniBoss",
+   "title": "強敵",
+   "power": "69,066",
+   "screen": [
+    1216,
+    2034,
+    1488,
+    2306
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Single_BattleMiniBoss(Clone)/Anim/Button"
+  },
+  {
+   "type": "shop",
+   "name_type": "Shop",
+   "title": "商店",
+   "power": null,
+   "screen": [
+    -208,
+    2274,
+    64,
+    2546
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Single_Shop(Clone)/Anim/Button"
+  },
+  {
+   "type": "event",
+   "name_type": "Event",
+   "title": "イベント",
+   "power": null,
+   "screen": [
+    504,
+    2274,
+    776,
+    2546
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Single_Event(Clone)/Anim/Button"
+  },
+  {
+   "type": "heal",
+   "name_type": "Recovery",
+   "title": "回復",
+   "power": null,
+   "screen": [
+    860,
+    2274,
+    1132,
+    2546
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Single_Recovery(Clone)/Anim/Button"
+  },
+  {
+   "type": "boss",
+   "name_type": "BattleBoss",
+   "title": "ボス\n",
+   "power": "73,743",
+   "screen": [
+    140,
+    2494,
+    1140,
+    2806
+   ],
+   "enterable": false,
+   "btn_path": "/Nether/Anim/Map/MapCanvas/RootUI/UIGroup/Stage/Front/MapFloor_Triple_BattleBoss(Clone)/Anim/Button"
+  }
+ ],
+ "roads": [
+  {
+   "elem": "Light",
+   "screen": [
+    -15,
+    494,
+    96,
+    606
+   ]
+  },
+  {
+   "elem": "Light",
+   "screen": [
+    50,
+    534,
+    162,
+    646
+   ]
+  },
+  {
+   "elem": "Light",
+   "screen": [
+    116,
+    574,
+    228,
+    686
+   ]
+  },
+  {
+   "elem": "Light",
+   "screen": [
+    228,
+    508,
+    340,
+    620
+   ]
+  },
+  {
+   "elem": "Light",
+   "screen": [
+    228,
+    568,
+    340,
+    680
+   ]
+  },
+  {
+   "elem": "Light",
+   "screen": [
+    940,
+    508,
+    1052,
+    620
+   ]
+  },
+  {
+   "elem": "Light",
+   "screen": [
+    940,
+    568,
+    1052,
+    680
+   ]
+  },
+  {
+   "elem": "Artifact",
+   "screen": [
+    1296,
+    508,
+    1408,
+    620
+   ]
+  },
+  {
+   "elem": "Artifact",
+   "screen": [
+    1296,
+    568,
+    1408,
+    680
+   ]
+  },
+  {
+   "elem": "Fire",
+   "screen": [
+    228,
+    748,
+    340,
+    860
+   ]
+  },
+  {
+   "elem": "Fire",
+   "screen": [
+    228,
+    808,
+    340,
+    920
+   ]
+  },
+  {
+   "elem": "Artifact",
+   "screen": [
+    940,
+    748,
+    1052,
+    860
+   ]
+  },
+  {
+   "elem": "Artifact",
+   "screen": [
+    940,
+    808,
+    1052,
+    920
+   ]
+  },
+  {
+   "elem": "Water",
+   "screen": [
+    104,
+    974,
+    216,
+    1086
+   ]
+  },
+  {
+   "elem": "Water",
+   "screen": [
+    38,
+    1014,
+    150,
+    1126
+   ]
+  },
+  {
+   "elem": "Water",
+   "screen": [
+    -27,
+    1054,
+    84,
+    1166
+   ]
+  },
+  {
+   "elem": "Water",
+   "screen": [
+    224,
+    988,
+    336,
+    1100
+   ]
+  },
+  {
+   "elem": "Water",
+   "screen": [
+    224,
+    1048,
+    336,
+    1160
+   ]
+  },
+  {
+   "elem": "Light",
+   "screen": [
+    584,
+    988,
+    696,
+    1100
+   ]
+  },
+  {
+   "elem": "Light",
+   "screen": [
+    584,
+    1048,
+    696,
+    1160
+   ]
+  },
+  {
+   "elem": "Light",
+   "screen": [
+    944,
+    988,
+    1056,
+    1100
+   ]
+  },
+  {
+   "elem": "Light",
+   "screen": [
+    944,
+    1048,
+    1056,
+    1160
+   ]
+  },
+  {
+   "elem": "Dark",
+   "screen": [
+    -128,
+    1228,
+    -15,
+    1340
+   ]
+  },
+  {
+   "elem": "Dark",
+   "screen": [
+    -128,
+    1288,
+    -15,
+    1400
+   ]
+  },
+  {
+   "elem": "Earth",
+   "screen": [
+    228,
+    1228,
+    340,
+    1340
+   ]
+  },
+  {
+   "elem": "Earth",
+   "screen": [
+    228,
+    1288,
+    340,
+    1400
+   ]
+  },
+  {
+   "elem": "Water",
+   "screen": [
+    471,
+    1214,
+    584,
+    1326
+   ]
+  },
+  {
+   "elem": "Water",
+   "screen": [
+    406,
+    1254,
+    518,
+    1366
+   ]
+  },
+  {
+   "elem": "Water",
+   "screen": [
+    340,
+    1294,
+    452,
+    1406
+   ]
+  },
+  {
+   "elem": "Artifact",
+   "screen": [
+    696,
+    1214,
+    808,
+    1326
+   ]
+  },
+  {
+   "elem": "Artifact",
+   "screen": [
+    762,
+    1254,
+    874,
+    1366
+   ]
+  },
+  {
+   "elem": "Artifact",
+   "screen": [
+    828,
+    1294,
+    940,
+    1406
+   ]
+  },
+  {
+   "elem": "Artifact",
+   "screen": [
+    940,
+    1228,
+    1052,
+    1340
+   ]
+  },
+  {
+   "elem": "Artifact",
+   "screen": [
+    940,
+    1288,
+    1052,
+    1400
+   ]
+  },
+  {
+   "elem": "Water",
+   "screen": [
+    -128,
+    1468,
+    -15,
+    1580
+   ]
+  },
+  {
+   "elem": "Water",
+   "screen": [
+    -128,
+    1528,
+    -15,
+    1640
+   ]
+  },
+  {
+   "elem": "Dark",
+   "screen": [
+    228,
+    1468,
+    340,
+    1580
+   ]
+  },
+  {
+   "elem": "Dark",
+   "screen": [
+    228,
+    1528,
+    340,
+    1640
+   ]
+  },
+  {
+   "elem": "Fire",
+   "screen": [
+    828,
+    1454,
+    940,
+    1566
+   ]
+  },
+  {
+   "elem": "Fire",
+   "screen": [
+    762,
+    1494,
+    874,
+    1606
+   ]
+  },
+  {
+   "elem": "Fire",
+   "screen": [
+    696,
+    1534,
+    808,
+    1646
+   ]
+  },
+  {
+   "elem": "Dark",
+   "screen": [
+    940,
+    1468,
+    1052,
+    1580
+   ]
+  },
+  {
+   "elem": "Dark",
+   "screen": [
+    940,
+    1528,
+    1052,
+    1640
+   ]
+  },
+  {
+   "elem": "Earth",
+   "screen": [
+    1052,
+    1454,
+    1164,
+    1566
+   ]
+  },
+  {
+   "elem": "Earth",
+   "screen": [
+    1118,
+    1494,
+    1230,
+    1606
+   ]
+  },
+  {
+   "elem": "Earth",
+   "screen": [
+    1184,
+    1534,
+    1296,
+    1646
+   ]
+  },
+  {
+   "elem": "Light",
+   "screen": [
+    -15,
+    1694,
+    96,
+    1806
+   ]
+  },
+  {
+   "elem": "Light",
+   "screen": [
+    50,
+    1734,
+    162,
+    1846
+   ]
+  },
+  {
+   "elem": "Light",
+   "screen": [
+    116,
+    1774,
+    228,
+    1886
+   ]
+  },
+  {
+   "elem": "Artifact",
+   "screen": [
+    228,
+    1708,
+    340,
+    1820
+   ]
+  },
+  {
+   "elem": "Artifact",
+   "screen": [
+    228,
+    1768,
+    340,
+    1880
+   ]
+  },
+  {
+   "elem": "Water",
+   "screen": [
+    696,
+    1694,
+    808,
+    1806
+   ]
+  },
+  {
+   "elem": "Water",
+   "screen": [
+    762,
+    1734,
+    874,
+    1846
+   ]
+  },
+  {
+   "elem": "Water",
+   "screen": [
+    828,
+    1774,
+    940,
+    1886
+   ]
+  },
+  {
+   "elem": "Fire",
+   "screen": [
+    940,
+    1708,
+    1052,
+    1820
+   ]
+  },
+  {
+   "elem": "Fire",
+   "screen": [
+    940,
+    1768,
+    1052,
+    1880
+   ]
+  },
+  {
+   "elem": "Light",
+   "screen": [
+    1296,
+    1708,
+    1408,
+    1820
+   ]
+  },
+  {
+   "elem": "Light",
+   "screen": [
+    1296,
+    1768,
+    1408,
+    1880
+   ]
+  },
+  {
+   "elem": "Earth",
+   "screen": [
+    116,
+    1934,
+    228,
+    2046
+   ]
+  },
+  {
+   "elem": "Earth",
+   "screen": [
+    50,
+    1974,
+    162,
+    2086
+   ]
+  },
+  {
+   "elem": "Earth",
+   "screen": [
+    -15,
+    2014,
+    96,
+    2126
+   ]
+  },
+  {
+   "elem": "Light",
+   "screen": [
+    340,
+    1934,
+    452,
+    2046
+   ]
+  },
+  {
+   "elem": "Light",
+   "screen": [
+    406,
+    1974,
+    518,
+    2086
+   ]
+  },
+  {
+   "elem": "Light",
+   "screen": [
+    471,
+    2014,
+    584,
+    2126
+   ]
+  },
+  {
+   "elem": "Artifact",
+   "screen": [
+    828,
+    1934,
+    940,
+    2046
+   ]
+  },
+  {
+   "elem": "Artifact",
+   "screen": [
+    762,
+    1974,
+    874,
+    2086
+   ]
+  },
+  {
+   "elem": "Artifact",
+   "screen": [
+    696,
+    2014,
+    808,
+    2126
+   ]
+  },
+  {
+   "elem": "Earth",
+   "screen": [
+    940,
+    1948,
+    1052,
+    2060
+   ]
+  },
+  {
+   "elem": "Earth",
+   "screen": [
+    940,
+    2008,
+    1052,
+    2120
+   ]
+  },
+  {
+   "elem": "Earth",
+   "screen": [
+    1296,
+    1948,
+    1408,
+    2060
+   ]
+  },
+  {
+   "elem": "Earth",
+   "screen": [
+    1296,
+    2008,
+    1408,
+    2120
+   ]
+  },
+  {
+   "elem": "Fire",
+   "screen": [
+    -128,
+    2188,
+    -15,
+    2300
+   ]
+  },
+  {
+   "elem": "Fire",
+   "screen": [
+    -128,
+    2248,
+    -15,
+    2360
+   ]
+  },
+  {
+   "elem": "Fire",
+   "screen": [
+    584,
+    2188,
+    696,
+    2300
+   ]
+  },
+  {
+   "elem": "Fire",
+   "screen": [
+    584,
+    2248,
+    696,
+    2360
+   ]
+  },
+  {
+   "elem": "Artifact",
+   "screen": [
+    940,
+    2188,
+    1052,
+    2300
+   ]
+  },
+  {
+   "elem": "Artifact",
+   "screen": [
+    940,
+    2248,
+    1052,
+    2360
+   ]
+  },
+  {
+   "elem": "Dark",
+   "screen": [
+    1184,
+    2174,
+    1296,
+    2286
+   ]
+  },
+  {
+   "elem": "Dark",
+   "screen": [
+    1118,
+    2214,
+    1230,
+    2326
+   ]
+  },
+  {
+   "elem": "Dark",
+   "screen": [
+    1052,
+    2254,
+    1164,
+    2366
+   ]
+  },
+  {
+   "elem": "Earth",
+   "screen": [
+    -15,
+    2414,
+    96,
+    2526
+   ]
+  },
+  {
+   "elem": "Earth",
+   "screen": [
+    50,
+    2454,
+    162,
+    2566
+   ]
+  },
+  {
+   "elem": "Earth",
+   "screen": [
+    116,
+    2494,
+    228,
+    2606
+   ]
+  },
+  {
+   "elem": "Water",
+   "screen": [
+    584,
+    2428,
+    696,
+    2540
+   ]
+  },
+  {
+   "elem": "Water",
+   "screen": [
+    584,
+    2488,
+    696,
+    2600
+   ]
+  },
+  {
+   "elem": "Fire",
+   "screen": [
+    940,
+    2428,
+    1052,
+    2540
+   ]
+  },
+  {
+   "elem": "Fire",
+   "screen": [
+    940,
+    2488,
+    1052,
+    2600
+   ]
+  }
+ ]
+}

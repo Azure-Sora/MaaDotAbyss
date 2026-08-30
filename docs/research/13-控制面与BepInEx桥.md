@@ -128,12 +128,27 @@ Windows 进程创建即绑死会话，**没有跨会话/跨宿主迁移机制**�
 4. `click_at` 需 `RectTransformUtility.WorldToScreenPoint(canvas.worldCamera, …)` 换算（Noa 框架的 `Engine/View/Canvas` 是相机空间画布）+ 图像 y 轴（向下）→ Unity 屏幕 y（向上）翻转；
 5. `/ui` 节点补 `screen:[x0,y0,x1,y1]`（截图像素系）——模板匹配命中坐标 ↔ 按钮路径映射的基础设施。
 
-**实战事件（入档经验）**：`daily_pack` 第 6 步点"確認購買"后出现 `購入內容確認` 弹窗，DMM 服务器往返期间弹窗变**僵尸**（视觉残留、`activeInHierarchy=false`、底层 scene 已切走）——树里节点仍在但按路径点击报"未找到"，用户手点几下自行消散。处置约定：**桥点击报"未找到/无可交互按钮"且截图画面仍有弹窗 = 疑似僵尸弹窗/服务器往返，等待 + 用户手点，勿重启**（与 M0 卡 loading 处置同族）。
-
 **遗留**：
 - [ ] `daily_pack` 剧本第 7 步（s8 锚点"OK领取奖励"）与实际弹窗链不符（确认弹窗后应先点其 OK）——等下次可领状态时 re-record 或修 yaml；
-- [ ] `swipe` 桥端映射（深渊拖拽）——需要游戏侧实现；
-- [ ] 非主城页面（深渊/教学页）的 `/ui` 树样本采集（丰富 `screen` 包围盒用例）。
+- [x] ~~swipe 桥端映射~~（降级：深渊候选可按路径直点屏外房间，拖地图需求大减；真需要再实现拖拽事件映射）
+- [x] ~~非主城页面 `/ui` 树样本~~（2026-08-30 深渊全流程采集完成，见下）
+
+### 2.7 v0.2.0 与深渊 UI 直读验证（2026-08-30）
+
+**插件升级**（v0.2.0，已部署）：
+- `/ui` 参数化：`{"canvas": "MapCanvas", "max_nodes": 30000}`——原来 4000 全局上限被全局菜单画布吃光，深渊地图画布（3298 节点）导不出；
+- 新端点 `click_ui {x,y}`：**射线式真实点击**（RaycastAll 最上层 → IPointerClickHandler）。起因是实测踩坑：深渊弹窗（ゲットキー消費等）的按钮**不是 Button 组件**，`click_at` 只认 Button 会穿透弹窗误点下层（实战误开了装备选择页）。`ExecuteEvents` 泛型在 interop 下编译通过，运行时若 AOT 缺实例化会优雅报错（Button 路径点击仍可兜底）。
+
+**深渊地图 = uGUI，可整树直读**（场景 `Nether`，画布 `MapCanvas`，`Stage/Front` 容器）：
+- 房间节点名自带类型：`MapFloor_{Single|Double|Triple}_{Battle|BattleMiniBoss|BattleBoss|Recovery|Event|Shop|Treasure}(Clone)`，共 27 房（20F→30F Boss 全图一次可得，含屏外）；
+- **候选房间 = 房间节点内 `Button.interactable`**——箭头/光圈的游戏态本体。实测下层 4 候选有 2 个在视口外（x=-72/1352），模板匹配+横向拖拽扫读整体被替代；
+- 标签/战力即子节点 TMP 文本：`NetherStageInfo/StageTitle`（強敵）、`TextPower`（69,066）；
+- 道路：`MapRoad_{Light|Fire|Water|Artifact}(Clone)`（87 条，带元素属性）；
+- 起点/续行弹窗链实测：出撃 → ゲットキー消費（默认 1 倍）→ 編成確認（挑む）→ 进图；入场也要过倍率弹窗（doc 12 只记了 boss 后有，已修正认知）。
+
+落地：`abyss_ui.py`（read_map/read_candidates）→ `abyss.read_candidates` 桥优先、模板兜底；规划器全链路真机验证（27 房间→4 候选→选 elite）。
+
+**实战事件（入档经验）**：`daily_pack` 第 6 步点"確認購買"后出现 `購入內容確認` 弹窗，DMM 服务器往返期间弹窗变**僵尸**（视觉残留、`activeInHierarchy=false`、底层 scene 已切走）——树里节点仍在但按路径点击报"未找到"，用户手点几下自行消散。处置约定：**桥点击报"未找到/无可交互按钮"且截图画面仍有弹窗 = 疑似僵尸弹窗/服务器往返，等待 + 用户手点，勿重启**（与 M0 卡 loading 处置同族）。
 
 **部署方式**：`bridge/DotAbyssBridge/bin/Release/net6.0/DotAbyssBridge.dll` → 游戏目录 `BepInEx/plugins/DotAbyssBridge/`；游戏运行中 DLL 锁定，需关游戏后覆盖（可用哨兵脚本监听进程退出自动 cp，本次两次均用此法）。
 
