@@ -6,7 +6,7 @@
 实机已验证（2026-08-30，doc 13 §2.7）：
 - 场景链 Nether(地图) → ExplorationBattle(战斗，自动跑) → ExplorarionNetherResult(结算)
 - 结算流：深渊代码三选一弹窗（精英/Boss 掉落）→ 探索報酬页「確認して次へ」（非 Button，
-  射线点击）→ Button_Next → 回 Nether
+  点文本会穿透到底下按钮，统一点屏幕左上角 (0,0) 整页跳过）→ Button_Next → 回 Nether
 - HUD（层数/侵蚀/钥匙/金币）全在 UICanvas 文本节点，对账零 OCR
 - 拿码后结算页明写颜色系统（"リスクコード系統の…"）——颜色注册表的自证来源
 """
@@ -224,15 +224,17 @@ def _result_step(device, led: AbyssLedger, brain, log=print, tree: dict | None =
                 device.click_by_path(n["button"]["path"])
                 log(f"  点击 {nm}")
                 return True
-    # 3) 射线连点（確認して次へ 等非 Button 区域；避开左下撤退区）
-    for x, y in ((640, 660), (1177, 661)):
+    # 3) 无按钮浮层（確認して次へ 等）：点屏幕最左上角整页跳过。这类页面的文本
+    #    不是射线目标，直接点会穿透到底下的按钮（探索報酬页实测 2026-08-30）；
+    #    左上角只会命中全屏接管层。click_ui 优先（全屏层未必是 Button），click_at 兜底。
+    for call in (device.click_ui, device.click):
         try:
-            p = device.click_ui(x, y)
+            p = call(0, 0)
         except Exception:
             continue
         if "PullOut" in p or "Retreat" in p:   # 铁律：绝不碰撤退
             raise RuntimeError(f"射线命中撤退按钮 {p}——立即停止")
-        log(f"  射线点击 ({x},{y}) → {p[-40:]}")
+        log(f"  左上角跳过 (0,0) → {p[-40:]}")
         return True
     return False
 
