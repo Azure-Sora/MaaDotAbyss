@@ -129,7 +129,9 @@ def main():
     except BridgeError:
         expect("swipe 拒绝", "")
 
-    # 无桥：发现文件指向死端口且默认端口无服务 → None
+    # 无桥：发现文件指向死端口且回退默认端口也被隔离 → None
+    # （真游戏开着时 DEFAULT_PORT 会被真桥应答，故一并指向死端口保证确定性）
+    db.DEFAULT_PORT = 27998
     db.BRIDGE_JSON.write_text(json.dumps({"port": 27999, "pid": 1}), encoding="utf-8")
     expect(bridge_info(timeout=0.5) is None, "无桥 → bridge_info None")
 

@@ -10,7 +10,8 @@ import yaml
 from .agent import run_task
 from .brain import Brain
 from .config import TASKS_DIR
-from .device import DeviceError, GameDevice
+from .device import DeviceError
+from .device_select import get_device
 from .flow import run_flow
 from .precondition import check_precondition
 
@@ -52,7 +53,7 @@ def run_selected(
             except Exception:
                 pass
 
-    device = _device or GameDevice()
+    device = _device or get_device()[0]
     brain = _brain or Brain(provider=provider)
 
     results = []

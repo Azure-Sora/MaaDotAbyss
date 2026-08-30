@@ -90,21 +90,11 @@ public sealed class BridgeBehaviour : MonoBehaviour
     private static byte[] EncodeCapture(Texture2D tex)
     {
         if (tex == null) throw new InvalidOperationException("截图纹理为空（游戏未渲染？）");
-        int w = tex.width, h = tex.height;
-        var src = tex.GetPixels32();               // 底行在前，需翻转到 PNG 顶行在前
-        var flipped = new Il2CppStructArray<Color32>(w * h);
-        for (int y = 0; y < h; y++)
-        {
-            int srcRow = (h - 1 - y) * w, dstRow = y * w;
-            for (int x = 0; x < w; x++) flipped[dstRow + x] = src[srcRow + x];
-        }
-        var outTex = new Texture2D(w, h, TextureFormat.RGBA32, false);
-        outTex.SetPixels32(flipped);
-        outTex.Apply();
-        var pngIl = ImageConversion.EncodeToPNG(outTex);
+        // 实测（2026-08-30 与 MAA WGC 逐像素对照）：CaptureScreenshotAsTexture 的
+        // GetPixels32 行序已是自顶向下，直接编码即与屏幕一致——不要再做任何翻转
+        var pngIl = ImageConversion.EncodeToPNG(tex);
         var png = new byte[pngIl.Length];
         for (int i = 0; i < png.Length; i++) png[i] = pngIl[i];
-        UnityEngine.Object.Destroy(outTex);
         return png;
     }
 
@@ -123,24 +113,24 @@ public sealed class BridgeBehaviour : MonoBehaviour
             if (c == null || !c.gameObject.activeInHierarchy) continue;
             if (!first) sb.Append(',');
             first = false;
-            sb.Append("{\"name\":\"").Append(Esc(c.gameObject.name)).Append("\",\"children\":");
-            Walk(c.transform, 0, sb, ref count, maxNodes, maxDepth);
-            sb.Append('}');
+            Walk(c.transform, 0, sb, ref count, maxNodes, maxDepth, c.worldCamera);
             if (count >= maxNodes) break;
         }
         sb.Append("]}");
         return sb.ToString();
     }
 
-    private void Walk(Transform tr, int depth, StringBuilder sb, ref int count, int maxNodes, int maxDepth)
+    private void Walk(Transform tr, int depth, StringBuilder sb, ref int count, int maxNodes, int maxDepth, Camera cam)
     {
         count++;
         sb.Append("{\"name\":\"").Append(Esc(tr.gameObject.name)).Append('"');
         sb.Append(",\"active\":").Append(tr.gameObject.activeSelf ? "true" : "false");
-        if (tr is RectTransform rt)
+        var rt = tr.TryCast<RectTransform>();
+        if (rt != null)
         {
             sb.Append(",\"pos\":[").Append((int)rt.anchoredPosition.x).Append(',').Append((int)rt.anchoredPosition.y).Append(']');
             sb.Append(",\"size\":[").Append((int)rt.rect.width).Append(',').Append((int)rt.rect.height).Append(']');
+            AppendScreenBox(rt, cam, sb);
         }
         var tmp = tr.GetComponent<TMPro.TMP_Text>();
         if (tmp != null && !string.IsNullOrEmpty(tmp.text))
@@ -163,11 +153,30 @@ public sealed class BridgeBehaviour : MonoBehaviour
                 if (child == null) continue;
                 if (!first) sb.Append(',');
                 first = false;
-                Walk(child, depth + 1, sb, ref count, maxNodes, maxDepth);
+                Walk(child, depth + 1, sb, ref count, maxNodes, maxDepth, cam);
                 if (count >= maxNodes) break;
             }
         }
         sb.Append("]}");
+    }
+
+    /// <summary>RectTransform 四角 → 屏幕包围盒（图像坐标，y 自顶向下），供模板匹配命中 → 按钮路径映射。</summary>
+    private static void AppendScreenBox(RectTransform rt, Camera cam, StringBuilder sb)
+    {
+        var corners = new Il2CppStructArray<Vector3>(4);
+        rt.GetWorldCorners(corners);
+        float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
+        for (int i = 0; i < 4; i++)
+        {
+            var sp = RectTransformUtility.WorldToScreenPoint(cam, corners[i]);
+            if (sp.x < minX) minX = sp.x;
+            if (sp.y < minY) minY = sp.y;
+            if (sp.x > maxX) maxX = sp.x;
+            if (sp.y > maxY) maxY = sp.y;
+        }
+        float hh = Screen.height;
+        sb.Append(",\"screen\":[").Append((int)minX).Append(',').Append((int)(hh - maxY))
+          .Append(',').Append((int)maxX).Append(',').Append((int)(hh - minY)).Append(']');
     }
 
     private static string NodePath(Transform tr)
@@ -193,9 +202,11 @@ public sealed class BridgeBehaviour : MonoBehaviour
         return NodePath(btn.transform);
     }
 
-    /// <summary>找点 (x,y) 下面积最小的可交互 Button（屏幕坐标，1280x720 客户区）并触发。</summary>
+    /// <summary>找点 (x,y) 下面积最小的可交互 Button 并触发。坐标为截图像素系（y 自顶向下）。</summary>
     public string ClickAtPoint(int x, int y)
     {
+        // 图像 y（向下）→ Unity 屏幕 y（向上）
+        int py = Screen.height - y;
         Button best = null;
         float bestArea = float.MaxValue;
         string bestPath = null;
@@ -203,20 +214,22 @@ public sealed class BridgeBehaviour : MonoBehaviour
         foreach (var b in buttons)
         {
             if (b == null || !b.interactable || !b.gameObject.activeInHierarchy) continue;
-            var rt = b.transform as RectTransform;
+            var rt = b.transform.TryCast<RectTransform>();
             if (rt == null) continue;
+            var canvas = b.GetComponentInParent<Canvas>();
+            var cam = canvas != null ? canvas.worldCamera : null;
             var corners = new Il2CppStructArray<Vector3>(4);
             rt.GetWorldCorners(corners);
             float minX = float.MaxValue, minY = float.MaxValue, maxX = float.MinValue, maxY = float.MinValue;
             for (int i = 0; i < 4; i++)
             {
-                var p = corners[i];
-                if (p.x < minX) minX = p.x;
-                if (p.y < minY) minY = p.y;
-                if (p.x > maxX) maxX = p.x;
-                if (p.y > maxY) maxY = p.y;
+                var sp = RectTransformUtility.WorldToScreenPoint(cam, corners[i]);
+                if (sp.x < minX) minX = sp.x;
+                if (sp.y < minY) minY = sp.y;
+                if (sp.x > maxX) maxX = sp.x;
+                if (sp.y > maxY) maxY = sp.y;
             }
-            if (x < minX || x > maxX || y < minY || y > maxY) continue;
+            if (x < minX || x > maxX || py < minY || py > maxY) continue;
             float area = (maxX - minX) * (maxY - minY);
             if (area < bestArea)
             {

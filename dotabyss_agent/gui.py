@@ -78,13 +78,14 @@ class RunState:
         self.worker: threading.Thread | None = None
         self.mode: str | None = None            # task / teach（ctl status 用）
         self.current_ids: list[str] = []
+        self.backend: str | None = None         # bridge / maa（ctl status 用）
         self._device = None                     # 进程内唯一 MAA 控制器（懒创建）
 
     def get_device(self):
         if self._device is None:
-            from .device import GameDevice
+            from .device_select import get_device
 
-            self._device = GameDevice()
+            self._device, self.backend = get_device()
         return self._device
 
     def has_device(self) -> bool:
@@ -93,6 +94,7 @@ class RunState:
     def drop_device(self) -> None:
         # 仅在引擎空闲时调用：运行中重建会产生并发双控制器（M0 实测 segfault）
         self._device = None
+        self.backend = None
 
     def clear_run(self) -> None:
         self.mode = None
@@ -842,6 +844,7 @@ class GuiCtlAdapter:
             "mode": self.state.mode if running else None,
             "tasks": list(self.state.current_ids),
             "game_bound": self.state.has_device(),
+            "backend": self.state.backend,
             "pid": os.getpid(),
             "results": results,
         }

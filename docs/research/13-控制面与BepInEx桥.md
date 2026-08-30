@@ -1,6 +1,6 @@
 # 13 · 控制面（GUI/CLI 联动）与真后台主路线：BepInEx 桥
 
-> 2026-08-30 ｜ 用户发起讨论定稿：真后台主路线改选 BepInEx 桥（子会话分身降为兜底）；控制面（GUI/CLI 联动）先行实施 ｜ 状态：控制面已落地✅；桥插件已编译部署✅，**待游戏内验证**（用户暂无法开游戏）
+> 2026-08-30 ｜ 用户发起讨论定稿：真后台主路线改选 BepInEx 桥（子会话分身降为兜底）；控制面（GUI/CLI 联动）先行实施 ｜ 状态：**控制面✅ + 桥真机验证全部通过✅ + 设备后端选择器合流✅**（遗留：daily_pack 剧本 s8 锚点、swipe 桥端映射）
 
 ## 0. 决策记录（2026-08-30 与用户确认）
 
@@ -108,15 +108,34 @@ Windows 进程创建即绑死会话，**没有跨会话/跨宿主迁移机制**�
 
 **Python 侧** `dotabyss_agent/device_bridge.py`：`bridge_info()`（发现文件→默认端口 ping）、`BridgeDevice`（screenshot/click/click_by_path/ui_tree/wait_settled/wait_until_stable/diff_ratio；`is_foreground()` 恒真、`bring_to_front()` 空操作；**swipe 未支持**——深渊拖拽等游戏侧映射后加）。`poc/bridge_mock_test.py` 假服务回环 10 项 ALL PASS。
 
-### 2.6 待游戏验证清单（下次能开游戏时）
+### 2.6 真机验证结果（2026-08-30，三轮游戏会话全部通过）
 
-1. 启动游戏 → `BepInEx/LogOutput.log` 应出现 `DotAbyssBridge 0.1.0 loaded` + `bridge listening on 127.0.0.1:27124`；游戏目录生成 `BepInEx/bridge.json`。
-2. `python -c "from dotabyss_agent.device_bridge import bridge_info; print(bridge_info())"` → pong。
-3. `/screenshot`：与 ctl screenshot（MAA）对照——内容一致、分辨率 1280×720、UI 完整、颜色/翻转正确。
-4. `/ui`：主城页面树完整性、Button 路径样本（为剧本 invoke 化积累）。
-5. `/click_at`：在主城点几个按钮验证"面积最小可交互按钮"命中律（Screen Space Overlay 假设）；Camera 空间 canvas 的点击偏移待观察。
-6. BridgeDevice 与 GameDevice 并行对照 wait_settled/wait_until_stable 语义。
-7. 验证通过后合流：设备后端选择器（bridge 在线优先、否则回退 MAA GameDevice）接入 runner/cli ctl。
+| 项 | 结果 | 备注 |
+| --- | --- | --- |
+| 桥随游戏加载 | ✅ | LogOutput: `DotAbyssBridge 0.1.0 loaded` + `bridge listening 127.0.0.1:27124`；`BepInEx/bridge.json` 落盘 |
+| ping / 零焦点 | ✅ | 游戏全程后台（`focused:false`），桥照常响应——真后台前提成立 |
+| /screenshot | ✅ | 1280×720、与 MAA WGC 逐像素对照一致（静态区 diff≈0）；**0.42s 比 MAA FramePool(0.68s) 快** |
+| /ui | ✅ | scene/6 Canvas/110 按钮；`children` 数组、`pos/size`、`screen` 包围盒齐全 |
+| /click 路径点击 | ✅ | `Button_Menu` 开菜单 → `Popup_Close` 关闭，全程零焦点 |
+| /click_at 坐标点击 | ✅ | 用树里 `Button_Menu` 的 `screen` 包围盒中心反点，精确命中并返回路径 |
+| wait_settled/wait_until_stable | ✅ | 同帧 diff=0；常动主城 diff=0.17 判不稳；语义与 GameDevice 一致 |
+| 端到端剧本 | ✅(6/7) | `daily_pack` fast path 整条跑在桥上：6 步点击全过，零焦点 |
+
+**验证中发现并修复的插件 bug（均已编译部署）**：
+1. 截图上下颠倒：`CaptureScreenshotAsTexture` 的像素行本就自顶向下，初版多翻了一次——用静态 UI 区域四向变换逐像素对照 MAA 钉死（vflip 后 diff≈0），改为直接编码；
+2. Canvas 层 `children` 被包成对象非数组；
+3. **interop 代理对象上 `is/as RectTransform` 不成立**（`Transform.GetChild` 返回基类代理）→ `pos/size` 缺失、`click_at` 永不命中；改 `TryCast<RectTransform>()`；
+4. `click_at` 需 `RectTransformUtility.WorldToScreenPoint(canvas.worldCamera, …)` 换算（Noa 框架的 `Engine/View/Canvas` 是相机空间画布）+ 图像 y 轴（向下）→ Unity 屏幕 y（向上）翻转；
+5. `/ui` 节点补 `screen:[x0,y0,x1,y1]`（截图像素系）——模板匹配命中坐标 ↔ 按钮路径映射的基础设施。
+
+**实战事件（入档经验）**：`daily_pack` 第 6 步点"確認購買"后出现 `購入內容確認` 弹窗，DMM 服务器往返期间弹窗变**僵尸**（视觉残留、`activeInHierarchy=false`、底层 scene 已切走）——树里节点仍在但按路径点击报"未找到"，用户手点几下自行消散。处置约定：**桥点击报"未找到/无可交互按钮"且截图画面仍有弹窗 = 疑似僵尸弹窗/服务器往返，等待 + 用户手点，勿重启**（与 M0 卡 loading 处置同族）。
+
+**遗留**：
+- [ ] `daily_pack` 剧本第 7 步（s8 锚点"OK领取奖励"）与实际弹窗链不符（确认弹窗后应先点其 OK）——等下次可领状态时 re-record 或修 yaml；
+- [ ] `swipe` 桥端映射（深渊拖拽）——需要游戏侧实现；
+- [ ] 非主城页面（深渊/教学页）的 `/ui` 树样本采集（丰富 `screen` 包围盒用例）。
+
+**部署方式**：`bridge/DotAbyssBridge/bin/Release/net6.0/DotAbyssBridge.dll` → 游戏目录 `BepInEx/plugins/DotAbyssBridge/`；游戏运行中 DLL 锁定，需关游戏后覆盖（可用哨兵脚本监听进程退出自动 cp，本次两次均用此法）。
 
 ## 3. 子会话兜底（挂起）
 
@@ -132,5 +151,6 @@ Windows 进程创建即绑死会话，**没有跨会话/跨宿主迁移机制**�
 - [x] 桥 spike·侦察（§2.5：Unity/BepInEx/interop/游戏代码地图）
 - [x] 桥 spike·插件编写+编译+部署（`bridge/DotAbyssBridge` → `BepInEx/plugins/DotAbyssBridge/`）
 - [x] 桥 spike·Python 侧 `device_bridge.py` + 假服务回环（mock ALL PASS）
-- [ ] **桥真机验证**（§2.6 清单，待用户可开游戏）
-- [ ] 设备后端选择器合流（bridge 优先 / MAA 回退）接入 runner 与 ctl
+- [x] **桥真机验证**（§2.6，三轮游戏会话，全部通过；含 click_at/UI 树/端到端剧本）
+- [x] 设备后端选择器合流（`device_select.get_device`：bridge 优先 / MAA 回退）接入 runner 与 GUI 共享设备，ctl status 暴露 `backend` 字段
+- [ ] 遗留三小项（§2.6：daily_pack s8 锚点、swipe 桥端映射、非主城页面 UI 树样本）
