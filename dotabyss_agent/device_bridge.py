@@ -109,9 +109,30 @@ class BridgeDevice:
             raise BridgeError("截图 PNG 解码失败")
         return img
 
-    def ui_tree(self) -> dict:
-        """当前场景 Canvas 层级 JSON（节点名/坐标/尺寸/TMP文本/Button 路径）。"""
-        return bridge_post("ui", port=self.port)
+    def ui_tree(self, canvas: str | None = None, max_nodes: int = 4000) -> dict:
+        """当前场景 Canvas 层级 JSON（节点名/坐标/尺寸/TMP文本/Button 路径）。
+
+        canvas: 只导出同名 Canvas（如 "MapCanvas"——深渊地图画布节点上万，
+        全量导出会撞默认 4000 上限）；max_nodes: 节点上限（v0.2.0+ 支持）。
+        旧插件忽略参数，行为等同全量 4000。
+        """
+        params = {}
+        if canvas:
+            params["canvas"] = canvas
+        if max_nodes != 4000:
+            params["max_nodes"] = max_nodes
+        return bridge_post("ui", params, port=self.port)
+
+    def click_ui(self, x: int, y: int) -> str:
+        """射线式真实点击（v0.2.0+）：RaycastAll 最上层对象 → IPointerClickHandler。
+
+        弹窗按钮普遍不是 Button 组件（ゲットキー消費实测），click_at 只认 Button
+        会穿透弹窗点到下层，弹窗一律用本方法。
+        """
+        r = bridge_post("click_ui", {"x": int(x), "y": int(y)}, port=self.port)
+        if not r.get("clicked"):
+            raise BridgeError(r.get("error", "点击失败"))
+        return r.get("path", "")
 
     # ---- 动作（零焦点） -------------------------------------------------
 

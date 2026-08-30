@@ -175,7 +175,25 @@ public sealed class BridgeServer
                 }
 
                 case "ui":
-                    return (200, Json(RunOnMain(() => _owner.BuildUiJson())), "application/json");
+                {
+                    var p = ParseJson(body);
+                    string canvas = p.TryGetValue("canvas", out var cv) ? cv : null;
+                    int maxNodes = 4000;
+                    if (p.TryGetValue("max_nodes", out var mn))
+                        int.TryParse(mn, out maxNodes);
+                    return (200, Json(RunOnMain(() => _owner.BuildUiJson(maxNodes, 40, canvas))), "application/json");
+                }
+
+                case "click_ui":
+                {
+                    var p = ParseJson(body);
+                    int x = int.Parse(p.TryGetValue("x", out var vx) ? vx : "-1");
+                    int y = int.Parse(p.TryGetValue("y", out var vy) ? vy : "-1");
+                    if (x < 0 || y < 0)
+                        return (400, JsonError("缺少 x/y"), "application/json");
+                    string clicked = RunOnMain(() => _owner.PointerClickAt(x, y));
+                    return (200, Json("{\"clicked\":true,\"path\":\"" + BridgeBehaviour.Esc(clicked) + "\"}"), "application/json");
+                }
 
                 case "click":
                 {

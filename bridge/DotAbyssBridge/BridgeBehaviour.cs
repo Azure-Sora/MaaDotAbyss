@@ -100,7 +100,7 @@ public sealed class BridgeBehaviour : MonoBehaviour
 
     // ---- UI 树导出（主线程） -------------------------------------------
 
-    internal string BuildUiJson(int maxNodes = 4000, int maxDepth = 40)
+    internal string BuildUiJson(int maxNodes = 4000, int maxDepth = 40, string canvasFilter = null)
     {
         var sb = new StringBuilder(1 << 16);
         sb.Append("{\"scene\":\"").Append(Esc(SceneManager.GetActiveScene().name))
@@ -111,6 +111,7 @@ public sealed class BridgeBehaviour : MonoBehaviour
         foreach (var c in canvases)
         {
             if (c == null || !c.gameObject.activeInHierarchy) continue;
+            if (canvasFilter != null && c.gameObject.name != canvasFilter) continue;
             if (!first) sb.Append(',');
             first = false;
             Walk(c.transform, 0, sb, ref count, maxNodes, maxDepth, c.worldCamera);
@@ -200,6 +201,36 @@ public sealed class BridgeBehaviour : MonoBehaviour
         if (btn == null) throw new KeyNotFoundException($"未找到按钮: {path}");
         btn.onClick.Invoke();
         return NodePath(btn.transform);
+    }
+
+    /// <summary>
+    /// 射线式真实点击：EventSystem.RaycastAll 取命中点最上层对象，沿层级找
+    /// IPointerClickHandler 触发（与真实 uGUI 点击同路径）。弹窗按钮普遍不是
+    /// Button 组件（ゲットキー消費实测），ClickAtPoint 只认 Button 会穿透弹窗，
+    /// 本方法补足。
+    /// </summary>
+    public string PointerClickAt(int x, int y)
+    {
+        int py = Screen.height - y;
+        var es = UnityEngine.EventSystems.EventSystem.current;
+        if (es == null) throw new InvalidOperationException("无 EventSystem");
+        var pd = new UnityEngine.EventSystems.PointerEventData(es)
+        {
+            position = new Vector2(x, py),
+            button = UnityEngine.EventSystems.PointerEventData.InputButton.Left,
+        };
+        var results = new Il2CppSystem.Collections.Generic.List<UnityEngine.EventSystems.RaycastResult>();
+        es.RaycastAll(pd, results);
+        if (results.Count == 0)
+            throw new KeyNotFoundException($"({x},{y}) 无 UI 命中");
+        var go = results[0].gameObject;
+        string hitPath = NodePath(go.transform);
+        var target = UnityEngine.EventSystems.ExecuteEvents.GetEventHandler<UnityEngine.EventSystems.IPointerClickHandler>(go);
+        if (target == null)
+            throw new KeyNotFoundException($"({x},{y}) 命中 {go.name}，但无 PointerClick 处理器");
+        UnityEngine.EventSystems.ExecuteEvents.Execute<UnityEngine.EventSystems.IPointerClickHandler>(
+            target, pd, UnityEngine.EventSystems.ExecuteEvents.pointerClickHandler);
+        return hitPath;
     }
 
     /// <summary>找点 (x,y) 下面积最小的可交互 Button 并触发。坐标为截图像素系（y 自顶向下）。</summary>

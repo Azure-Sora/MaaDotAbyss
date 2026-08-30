@@ -17,7 +17,7 @@ public sealed class BridgePlugin : BasePlugin
 {
     public const string GUID = "local.dotabyss.bridge";
     public const string NAME = "DotAbyssBridge";
-    public const string VERSION = "0.1.0";
+    public const string VERSION = "0.2.0";
 
     internal new static ManualLogSource Log;
     internal static ConfigEntry<int> Port;
