@@ -181,6 +181,20 @@ class BridgeDevice:
             return p
         raise BridgeError("左上角 (0,0) 未命中任何可点击层")
 
+    def tap(self, x: int, y: int) -> bool:
+        """真实点击语义：RaycastAll 最上层命中 → 沿层级找 IPointerClickHandler
+        （与真人点击同路径，被浮层遮挡的下层按钮绝不可达）。
+
+        未命中（目标被遮挡/纯文本无处理器）返回 False 当作无反应。
+        绝不可回退 click_at——按钮搜索直调 onClick 无视遮挡会穿透：
+        礼物页一括受け取り→冒险、探索報酬確認して次へ→抽卡入口 两次实测事故。
+        """
+        try:
+            self.click_ui(x, y)
+            return True
+        except Exception:
+            return False
+
     def swipe(self, *args, **kwargs) -> None:
         raise BridgeError("桥后端暂不支持 swipe（需游戏侧拖拽映射，doc 13 §2.4）")
 

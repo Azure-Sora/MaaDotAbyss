@@ -42,7 +42,8 @@ def ensure_home(device, log=print, max_rounds: int = 8) -> bool:
         if pos is None:
             log(f"  [{i}] 未识别返回控件，左上角兜底点击…")
             pos = (46, 35)
-        device.click(*pos)
+        if not device.tap(*pos):
+            log(f"  [{i}] 点击{pos} 未命中可点目标（被遮挡/不可点）")
         device.wait_settled(f)
     return bool(anchor_visible(device.screenshot(), home, 0.85))
 
@@ -230,7 +231,8 @@ def guided_generate(task: dict, brain: Brain, run_dir: Path, flow_id: str, devic
         cv2.imwrite(str(adir / name), crop_bgr)
         thr = round(max(0.72, min(0.95, score - 0.06)), 2)
         log(f"  ✓ {p.get('name')}: 锚点 {w}x{h} 实测分 {score:.2f} 阈值 {thr}，回放点击{loc}")
-        device.click(*loc)
+        if not device.tap(*loc):
+            log(f"  ⚠ 回放点击{loc} 未命中可点目标（被遮挡/不可点）")
         pre = device.screenshot()
         device.wait_settled(pre)
         steps.append({

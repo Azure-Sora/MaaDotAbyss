@@ -168,7 +168,12 @@ def run_task(
             if not (0 <= x < COORD_LIMIT[0] and 0 <= y < COORD_LIMIT[1]):
                 history.append(f"step{step}: [坐标越界 ({x},{y})] {thought}")
                 continue
-            device.click(x, y)
+            if not device.tap(x, y):
+                # 真实点击语义：未命中=目标被遮挡或非可点目标，绝不穿透
+                # （礼物页一括受け取り→冒险、探索報酬→抽卡入口 两次实测事故）
+                history.append(f"step{step}: [点击未命中 ({x},{y})——目标被遮挡或不可点] {thought}")
+                log(f"step{step}: [点击未命中 ({x},{y})] 目标被遮挡或非可点目标（真实点击，不穿透）")
+                continue
             if record:
                 frames_dir.mkdir(parents=True, exist_ok=True)
                 pre_path = frames_dir / f"s{step:02d}_pre.png"

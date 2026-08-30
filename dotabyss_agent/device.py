@@ -98,6 +98,11 @@ class GameDevice:
         """
         self.click(2, 2)
 
+    def tap(self, x: int, y: int) -> bool:
+        """真实点击语义（与真人点击等价，系统点击天然无穿透问题）。恒成功。"""
+        self.click(x, y)
+        return True
+
     def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 400) -> None:
         """拖拽（按住左键滑动）。深渊地图横向卷动用；起点终点为 1280x720 客户区坐标。"""
         if not self.is_foreground():

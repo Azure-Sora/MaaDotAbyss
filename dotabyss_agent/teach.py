@@ -148,7 +148,10 @@ def run_teach_session(
             if not (0 <= x < COORD_LIMIT[0] and 0 <= y < COORD_LIMIT[1]):
                 history.append(f"step{step}: [坐标越界 ({x},{y})] {thought}")
                 continue
-            device.click(x, y)
+            if not device.tap(x, y):
+                # 真实点击语义：未命中=被遮挡/不可点，不穿透；不录无效点击
+                history.append(f"step{step}: [点击未命中 ({x},{y})——目标被遮挡或不可点] {thought}")
+                continue
             frames_dir = run_dir / "frames"
             frames_dir.mkdir(exist_ok=True)
             pre_path = frames_dir / f"s{step:02d}_pre.png"

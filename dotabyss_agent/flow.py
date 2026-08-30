@@ -118,7 +118,14 @@ class FlowRunner:
             if "coord" in step:  # 固定坐标直点（用于无锚点的已知位置，如右上角 X）
                 x, y = step["coord"]
                 pre_frame = self.device.screenshot()
-                self.device.click(x, y)
+                if not self.device.tap(x, y):
+                    # 真实点击语义：未命中=被遮挡/不可点，不穿透；算失败重试
+                    log(f"  click({x},{y}) 未命中可点目标（被遮挡/不可点）"
+                        + (f" 第{attempt}次" if attempt > 1 else ""))
+                    if attempt >= attempts:
+                        raise FlowError(f"点击未命中: ({x},{y})（被遮挡/不可点，已重试 {attempts} 次）")
+                    time.sleep(1.0)
+                    continue
                 log(f"  click{tuple(step['coord'])} (coord)" + (f" 第{attempt}次" if attempt > 1 else ""))
             elif "find" in step:
                 find = step["find"]
@@ -133,7 +140,13 @@ class FlowRunner:
                         return
                     raise FlowError(f"锚点未命中: {find['anchor']}")
                 pre_frame = frame
-                self.device.click(*pos)
+                if not self.device.tap(*pos):
+                    log(f"  click{pos} 未命中可点目标（被遮挡/不可点）"
+                        + (f" 第{attempt}次" if attempt > 1 else ""))
+                    if attempt >= attempts:
+                        raise FlowError(f"点击未命中: {pos}（锚点在但不可点，已重试 {attempts} 次）")
+                    time.sleep(1.0)
+                    continue
                 log(f"  click{pos}" + (f" 第{attempt}次" if attempt > 1 else ""))
             elif step.get("act") == "wait_settled":
                 pre_frame = self.device.screenshot()
@@ -183,7 +196,9 @@ class FlowRunner:
                 log(f"  循环结束（目标锚点消失，共点击 {i - 1} 次）")
                 return
             pre = self.device.screenshot()
-            self.device.click(*pos)
+            if not self.device.tap(*pos):
+                log(f"  loop click{pos} 未命中可点目标（被遮挡/不可点），跳过本次")
+                continue
             self.device.wait_settled(pre)
             log(f"  loop click{pos} 第 {i} 次")
         raise FlowError(f"循环点击 {max_times} 次仍未达成退出条件")
