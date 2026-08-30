@@ -14,6 +14,8 @@ from PIL import Image
 from .brain import Brain, BrainError
 from .config import HISTORY_KEEP, KNOWLEDGE_DIR, RUNS_DIR
 from .device import GameDevice
+from .macros import wait_transition_done
+from .routines import ROUTINES
 
 COORD_LIMIT = (1280, 720)
 
@@ -199,6 +201,12 @@ def run_task(
                     "thought": thought, "pre": str(pre_path.relative_to(run_dir)),
                 })
             device.wait_settled(frame)  # 等页面转场平息（慢加载的页面不再重复误点）
+            if not wait_transition_done(device):
+                # 点击打断 CommonLoad 会 NOW LOAD 卡屏：转场不结束绝不继续点
+                log("[红线] 转场动画未结束（疑似卡屏），停止后续点击，请人工检查游戏")
+                result.update(status="blocked", steps=step,
+                              detail="转场 loading 疑似卡死，已熔断（请人工恢复）")
+                break
             bad = forbidden_scene(device)
             if bad:
                 log(f"[红线] 点击后误入禁区场景 {bad}——任务熔断，请人工退出该页面")
@@ -213,6 +221,11 @@ def run_task(
             # 无按钮翻页/结算提示（確認して次へ 等）：点文字会穿透，统一点左上角
             device.skip_page()
             device.wait_settled(frame)
+            if not wait_transition_done(device):
+                log("[红线] 转场动画未结束（疑似卡屏），停止后续点击")
+                result.update(status="blocked", steps=step,
+                              detail="转场 loading 疑似卡死，已熔断（请人工恢复）")
+                break
             history.append(f"step{step}: 左上角跳页｜{thought}")
             pending_click = (0, 0, frame)
             prev_click = (0, 0)
@@ -226,6 +239,41 @@ def run_task(
             timeout = min(float(action.get("timeout", 60)), 150.0)
             ok = device.wait_until_stable(timeout=timeout)
             history.append(f"step{step}: 等待稳定({'达成' if ok else '超时'})｜{thought}")
+
+        elif act == "auto":
+            # 程序接管连打（docs/research/14）：LLM 导航到入口页后把重复段交程序
+            rid = str(action.get("routine", ""))
+            fn = ROUTINES.get(rid)
+            if fn is None:
+                history.append(f"step{step}: [auto] 未知 routine {rid}"
+                               f"（可用: {', '.join(ROUTINES)}）")
+                continue
+            log(f"step{step}: [auto {rid}] 程序接管连打开始")
+            auto_t0 = time.time()
+            try:
+                res = fn(device, log=log, stop_event=stop_event, frame_cb=frame_cb)
+            except Exception as e:  # routine 内部异常不当任务失败，交 LLM 决断
+                res = {"status": "partial", "cleared": 0,
+                       "detail": f"{e.__class__.__name__}: {e}"}
+            # 程序段耗时（战斗连打可达数分钟）不占 LLM 决策预算：整体后移计费起点
+            t0 += time.time() - auto_t0
+            status = res.get("status")
+            hint = {
+                "done": "程序已清剿完毕，请继续任务剩余步骤",
+                "wrong_scene": "还不在入口页——请先按任务路径导航到入口页后再调 auto",
+                "partial": f"程序中途交还控制权，按 detail 判断：接手处理或换目标",
+            }.get(status, "按 detail 处理")
+            history.append(f"step{step}: [auto {rid}] status={status} "
+                           f"cleared={res.get('cleared', 0)}｜{res.get('detail', '')}｜{hint}")
+            log(f"step{step}: [auto {rid}] {status} cleared={res.get('cleared', 0)} "
+                f"{res.get('detail', '')}")
+            frame2 = device.screenshot()
+            _save_frame(frame2, run_dir, f"step{step:02d}_after_auto.png")
+            if frame_cb is not None:
+                try:
+                    frame_cb(frame2)
+                except Exception:
+                    pass
 
         elif act == "report":
             status = str(action.get("status", ""))

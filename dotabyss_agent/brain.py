@@ -34,6 +34,15 @@ SYSTEM_PROMPT = """你是《DOT ABYSS》(ドットアビスX) 游戏的自动化
 
 等待判断：战斗/加载/入场动画期间画面变化大但无 UI 可点时用 wait；看到目标按钮再用 click。
 
+程序接管动作 auto：连打类任务走到入口页后，把重复性战斗整体交给程序执行，不要自己一场场打：
+{"thought": "一句话推理", "action": "auto", "routine": "forces_sweep", "reason": "已在势力任务列表页"}
+- forces_sweep：勢力クエスト列表页（五张关卡卡可见）→ 程序自动清剿全部开放关卡的剩余次数
+- disaster_sweep：迎撃戦页面（三个小 boss 卡可见）→ 程序自动逐个击退（大厄災/特殊 boss 不打）
+- expedition_sweep：探索队页面（探索クエスト発生中）→ 程序自动把第一个任务的免费次数打完
+调用后程序连续战斗并回报 status：wrong_scene=还没走到入口页（先导航再调）；done=清剿完毕
+（继续任务剩余步骤，如返回主页）；partial=中途交还（按 detail 决定接手或换目标）。
+还没走到入口页、或入口页都没打开时，绝不要猜页面内容或凭空调 auto。
+
 输出格式——只输出一个 JSON 对象，禁止输出其他文字：
 {"thought": "一句话推理", "action": "click", "x": 100, "y": 200}
 {"thought": "一句话推理", "action": "skip", "reason": "跳过无按钮的翻页/结算提示页"}
