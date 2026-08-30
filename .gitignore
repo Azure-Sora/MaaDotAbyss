@@ -3,5 +3,4 @@ _refs/
 *.pyc
 __pycache__/
 poc/*_out/
-bin/
-obj/
+poc/abyss_map_ui.json
