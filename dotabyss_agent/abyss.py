@@ -607,6 +607,65 @@ def _press_recenter(device, log=print) -> None:
     log("  [recenter] 未找到 現在地へ 按钮")
 
 
+# ---- 入场流（NetherTop → 深渊地图，实测 2026-08-30） --------------------------------
+
+
+def _tap_text(device, keyword: str, log=print, tree: dict | None = None,
+              tries: int = 3) -> bool:
+    for _ in range(tries):
+        t = tree or device.ui_tree(max_nodes=30000)
+        if _click_text_center(device, t, keyword, log=log):
+            return True
+        time.sleep(1.5)
+        tree = None
+    return False
+
+
+def enter_run(device, start_floor: int, log=print) -> None:
+    """从 NetherTop 入口一路点到深渊地图；已在地图（Nether）中则跳过。"""
+    time.sleep(1.5)
+    scene = _scene(device)
+    if scene == "Nether":
+        log("[入场] 已在深渊地图中，跳过入场")
+        return
+    if scene != "NetherTop":
+        raise RuntimeError(f"请先把游戏停在深渊入口页（NetherTop），当前场景: {scene or '未知'}")
+    device.click_by_path(
+        "/NetherTop/UICanvas/RootUI/UIGroup/Scene_NetherTop/Button_GateStart/Button_Start")
+    log("[入场] 探索開始")
+    time.sleep(2.0)
+    # 地点选择：点目标层检查点（如 20F）→ 確定
+    if not _tap_text(device, f"{start_floor}F", log=log):
+        raise RuntimeError(f"地点选择页未找到检查点 {start_floor}F")
+    time.sleep(0.6)
+    if not _tap_text(device, "確定", log=log):
+        raise RuntimeError("地点选择页未找到 確定")
+    log(f"[入场] 检查点 {start_floor}F 確定")
+    time.sleep(2.0)
+    # 编成页：出撃
+    if not _tap_text(device, "出撃", log=log):
+        raise RuntimeError("编成页未找到 出撃")
+    log("[入场] 出撃")
+    time.sleep(2.0)
+    # ゲットキー消費弹窗：核验 1 倍 → 使用
+    tree = device.ui_tree(max_nodes=12000)
+    texts = [n.get("text") or "" for n in _walk_all(tree)]
+    mults = [t.strip() for t in texts if re.fullmatch(r"[123]\s*倍", t.strip())]
+    if mults and any(not m.startswith("1") for m in mults):
+        raise RuntimeError(f"倍率非 1 倍: {mults}——需人工核验")
+    if not _tap_text(device, "使用", log=log):
+        raise RuntimeError("倍率弹窗未找到 使用")
+    log("[入场] 倍率 1 倍 使用")
+    time.sleep(2.0)
+    # 安全箱 → キャンセル
+    for _ in range(6):
+        if _tap_text(device, "キャンセル", log=log):
+            log("[入场] 安全箱 キャンセル")
+            break
+        time.sleep(1.5)
+    time.sleep(2.0)
+
+
 def run_to_floor(device, led: AbyssLedger, brain=None, log=print,
                  max_rooms: int = 6) -> dict:
     """监督式主循环：推进房间直到 max_rooms 或到达 target_floor 的续行点结算。"""

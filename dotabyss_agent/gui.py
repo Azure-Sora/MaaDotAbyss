@@ -6,6 +6,7 @@
 
 页面：
 - 任务：任务勾选、运行参数、启停控制、运行日志
+- 深渊：自动刷深渊（入场→监督推进→结算），账本实时上屏
 - 监控：游戏画面实时预览 + LLM 决策流时间线（每步截图/动作/思考）
 
 选型依据见 docs/research/10-UI框架选型调研.md。
@@ -67,6 +68,7 @@ class RunSignals(QObject):
     tstate = Signal(str)            # 教学模式状态机 auto/awaiting/distilling/done
     think = Signal(dict)            # 教学模式 {"phase":"start"/"done","tokens":int|None}
     ctl_call = Signal(object)       # 控制面：HTTP 线程投递到 GUI 线程执行的闭包
+    ledger = Signal(dict)           # 深渊账本快照 {floor, erosion, keys, coins, 四色码}
 
 
 class RunState:
@@ -438,6 +440,255 @@ class TaskPage(QWidget):
             return
         base = item.text().split("【")[0]
         item.setText(f"{base}【{status}】")
+
+
+# ---- 深渊页（自动刷装备，docs/research/12） --------------------------------
+
+QUOTA_ZH = (("safe", "蓝"), ("rush", "红"), ("impact", "黄"), ("risk", "紫"))
+LEDGER_ZH = (("floor", "层数"), ("erosion", "侵蚀"), ("keys", "钥匙"), ("coins", "金币"),
+             ("impact", "黄码"), ("rush", "红码"), ("safe", "蓝码"), ("risk", "紫码"))
+
+
+class AbyssPage(QWidget):
+    """自动深渊：入场 → 监督式推进（选房/拿码/事件）→ 到层结算。
+
+    封装 abyss.enter_run + run_to_floor（poc/abyss_run 同款实测流程）；
+    账本经 ledger 信号实时上屏；log 回调兼任停止检查点与画面抽帧。
+    """
+
+    def __init__(self, state: RunState, parent=None):
+        super().__init__(parent)
+        self.setObjectName("abyssPage")
+        self.state = state
+        self._led = None            # AbyssLedger（worker 线程在写，GUI 只读快照）
+        self._last_shot = 0.0
+
+        self.status_label = CaptionLabel("待机（游戏停在深渊入口页或深渊地图中即可启动）")
+
+        # ---- 启停 ----
+        ctrl = CardWidget()
+        c = QHBoxLayout(ctrl)
+        c.setContentsMargins(16, 10, 16, 10)
+        c.setSpacing(8)
+        self.btn_start = PrimaryPushButton(FIF.GLOBE, "开始探索")
+        self.btn_stop = PushButton(FIF.PAUSE, "停止")
+        self.btn_stop.setEnabled(False)
+        c.addWidget(self.btn_start)
+        c.addWidget(self.btn_stop)
+        c.addStretch(1)
+        c.addWidget(BodyLabel("模型"))
+        self.provider = ComboBox()
+        self.provider.addItems(list(PROVIDERS))
+        self.provider.setCurrentText(ACTIVE_PROVIDER)
+        c.addWidget(self.provider)
+
+        # ---- 参数 ----
+        cfg = CardWidget()
+        g = QHBoxLayout(cfg)
+        g.setContentsMargins(16, 10, 16, 10)
+        g.setSpacing(8)
+        self.target = SpinBox()
+        self.target.setRange(1, 200)
+        self.target.setValue(40)
+        self.start_floor = SpinBox()
+        self.start_floor.setRange(1, 100)
+        self.start_floor.setValue(20)
+        self.max_rooms = SpinBox()
+        self.max_rooms.setRange(1, 200)
+        self.max_rooms.setValue(30)
+        for label, w in (("目标层", self.target), ("起始检查点", self.start_floor),
+                         ("房间上限", self.max_rooms)):
+            g.addWidget(BodyLabel(label))
+            g.addWidget(w)
+        g.addStretch(1)
+        g.addWidget(BodyLabel("代码配额"))
+        self.quota_spins: dict[str, SpinBox] = {}
+        for color, zh in QUOTA_ZH:
+            sp = SpinBox()
+            sp.setRange(0, 31)
+            self.quota_spins[color] = sp
+            g.addWidget(BodyLabel(zh))
+            g.addWidget(sp)
+        self.quota_spins["safe"].setValue(6)
+        self.quota_spins["rush"].setValue(3)
+
+        # ---- 账本 ----
+        ledger_card = CardWidget()
+        lh = QHBoxLayout(ledger_card)
+        lh.setContentsMargins(16, 8, 16, 8)
+        lh.setSpacing(20)
+        self.ledger_vals: dict[str, StrongBodyLabel] = {}
+        for key, zh in LEDGER_ZH:
+            box = QVBoxLayout()
+            box.setSpacing(0)
+            box.addWidget(CaptionLabel(zh))
+            val = StrongBodyLabel("-")
+            self.ledger_vals[key] = val
+            box.addWidget(val)
+            holder = QWidget()
+            holder.setLayout(box)
+            lh.addWidget(holder)
+        lh.addStretch(1)
+
+        # ---- 日志 ----
+        log_card = CardWidget()
+        lv = QVBoxLayout(log_card)
+        lv.setContentsMargins(12, 8, 12, 8)
+        self.log_box = TextEdit()
+        self.log_box.setReadOnly(True)
+        self.log_box.setFont(QFont("Consolas", 9))
+        self.log_box.document().setMaximumBlockCount(2000)
+        lv.addWidget(self.log_box)
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 24, 24, 12)
+        lay.setSpacing(10)
+        head = QHBoxLayout()
+        head.addWidget(TitleLabel("深渊"))
+        head.addStretch(1)
+        head.addWidget(self.status_label)
+        lay.addLayout(head)
+        lay.addWidget(ctrl)
+        lay.addWidget(cfg)
+        lay.addWidget(ledger_card)
+        lay.addWidget(log_card, 1)
+
+        self.btn_start.clicked.connect(self._start)
+        self.btn_stop.clicked.connect(self._stop)
+        state.sig.log.connect(self.log_box.append)
+        state.sig.ledger.connect(self._on_ledger)
+        state.sig.result.connect(self._on_result)
+        state.sig.running.connect(self._on_running)
+
+    # ---- 启停 ----
+
+    def _start(self):
+        if self.state.worker and self.state.worker.is_alive():
+            InfoBar.warning("提示", "有任务/教学/深渊正在进行", parent=self,
+                            position=InfoBarPosition.TOP, duration=2500)
+            return
+        target = self.target.value()
+        start_floor = self.start_floor.value()
+        if start_floor > target:
+            InfoBar.warning("提示", "起始检查点不能高于目标层", parent=self,
+                            position=InfoBarPosition.TOP, duration=2500)
+            return
+        quota = {c: sp.value() for c, sp in self.quota_spins.items() if sp.value() > 0}
+        self.state.stop_event.clear()
+        self.state.mode = "abyss"
+        self.state.current_ids = ["abyss"]
+        self._led = None
+        self._last_shot = 0.0
+        for val in self.ledger_vals.values():
+            val.setText("-")
+        args = (target, start_floor, quota, self.provider.currentText(), self.max_rooms.value())
+        self.state.worker = threading.Thread(target=self._work, args=args, daemon=True)
+        self.state.worker.start()
+        self.state.sig.running.emit(True)
+
+    def _stop(self):
+        self.state.stop_event.set()
+        self.status_label.setText("停止中（下一个日志点生效；战斗等待中需等本场结束）…")
+
+    def _work(self, target, start_floor, quota, provider, max_rooms):
+        s = self.state.sig
+        stop = self.state.stop_event
+
+        class StopRequested(Exception):
+            pass
+
+        def log(line: str):
+            s.log.emit(line)
+            if stop.is_set():
+                raise StopRequested()
+            self._maybe_frame()
+            if self._led is not None:
+                s.ledger.emit(self._snapshot())
+
+        try:
+            from .abyss import enter_run, run_to_floor
+            from .abyss_plan import AbyssLedger
+            from .abyss_ui import read_hud
+            from .brain import Brain
+
+            device = self.state.get_device()
+            device.bring_to_front()
+            enter_run(device, start_floor, log=log)
+            hud = read_hud(device)
+            log(f"[开局] HUD: {hud}")
+            led = AbyssLedger(
+                floor=hud.get("floor", start_floor), erosion=hud.get("erosion", 0),
+                getkeys=hud.get("keys", 0), coins=hud.get("coins", 0),
+                quota=quota, target_floor=target)
+            self._led = led
+            brain = Brain(provider=provider)   # 未知名代码 → 视觉定色入册
+            r = run_to_floor(device, led, brain=brain, max_rooms=max_rooms, log=log)
+            log(f"===== 深渊结束: {json.dumps(r, ensure_ascii=False)}")
+            s.result.emit({"type": "result", "task": "abyss", "status": r.get("status", "?")})
+        except StopRequested:
+            s.log.emit("[深渊] 已停止——可重新从检查点继续")
+            s.result.emit({"type": "result", "task": "abyss", "status": "stopped"})
+        except Exception as e:
+            s.log.emit(f"[深渊异常] {e.__class__.__name__}: {e}")
+            s.result.emit({"type": "result", "task": "abyss", "status": "failed"})
+        finally:
+            self._led = None
+            self.state.clear_run()
+            s.running.emit(False)
+
+    # ---- 槽 ----
+
+    def _on_ledger(self, snap: dict):
+        for key, val in self.ledger_vals.items():
+            v = snap.get(key)
+            if v is not None:
+                val.setText(str(v))
+
+    def _on_result(self, r: dict):
+        if r.get("task") != "abyss":
+            return
+        status = r.get("status")
+        tip = {
+            "settled": ("深渊完成", "已到目标层并结算", InfoBar.success, 5000),
+            "rooms_exhausted": ("房间上限", "已推进到房间上限但未到结算点", InfoBar.warning, 5000),
+            "no_candidates": ("深渊受阻", "地图上没有候选房间，请人工看一眼", InfoBar.error, -1),
+            "stopped": ("深渊已停止", "进度保留，可从检查点继续", InfoBar.warning, 5000),
+            "failed": ("深渊异常", "详见下方日志", InfoBar.error, -1),
+        }.get(status)
+        if tip:
+            title, text, maker, dur = tip
+            maker(title, text, parent=self, position=InfoBarPosition.TOP, duration=dur)
+
+    def _on_running(self, running: bool):
+        self.btn_start.setEnabled(not running)
+        self.btn_stop.setEnabled(running)
+        if not running:
+            self.status_label.setText("待机")
+
+    # ---- 内部 ----
+
+    def _snapshot(self) -> dict:
+        led = self._led
+        if led is None:
+            return {}
+        hud_keys = getattr(led, "keys", None)   # reconcile 以 HUD 键名回填，优先于账面 getkeys
+        return {
+            "floor": led.floor, "erosion": led.erosion,
+            "keys": led.getkeys if hud_keys is None else hud_keys,
+            "coins": led.coins,
+            **{c: led.buffs.get(c, 0) for c, _ in QUOTA_ZH},
+        }
+
+    def _maybe_frame(self):
+        """日志点顺带抽帧（≥2.5s 一张，失败不影响主流程）→ 监控页同步可见。"""
+        now = time.monotonic()
+        if now - self._last_shot < 2.5:
+            return
+        self._last_shot = now
+        try:
+            self.state.sig.frame.emit(self.state.get_device().screenshot())
+        except Exception:
+            pass
 
 
 # ---- 教学页（新建任务，docs/research/11） --------------------------------
@@ -926,9 +1177,11 @@ class MainWindow(FluentWindow):
 
         self.monitor = MonitorPage(self.state)
         self.tasks = TaskPage(self.state, self.monitor)
+        self.abyss = AbyssPage(self.state)
         self.teach = TeachPage(self.state, self.tasks)
 
         self.addSubInterface(self.tasks, FIF.PLAY, "任务")
+        self.addSubInterface(self.abyss, FIF.GLOBE, "深渊")
         self.addSubInterface(self.monitor, FIF.CAMERA, "监控")
         self.addSubInterface(self.teach, FIF.ADD, "新建任务")
 
@@ -951,7 +1204,7 @@ class MainWindow(FluentWindow):
         for sig in (self.state.sig.log, self.state.sig.frame, self.state.sig.step,
                     self.state.sig.result, self.state.sig.running,
                     self.state.sig.chat, self.state.sig.tstate, self.state.sig.think,
-                    self.state.sig.ctl_call):
+                    self.state.sig.ctl_call, self.state.sig.ledger):
             try:
                 sig.disconnect()
             except RuntimeError:
