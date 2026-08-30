@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net6.0</TargetFramework>
+    <LangVersion>10.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <AssemblyName>DotAbyssBridge</AssemblyName>
+    <RootNamespace>DotAbyssBridge</RootNamespace>
+    <Version>0.1.0</Version>
+    <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
+    <NoWarn>CS0436;CS0648;CS0109;CS0626;IDE0051;IDE1006</NoWarn>
+    <!-- 游戏目录可用 -p:GameDir=... 覆盖 -->
+    <GameDir Condition="'$(GameDir)' == ''">E:\Games\DMM\dotabyss_x_cl</GameDir>
+    <CoreDir>$(GameDir)\BepInEx\core</CoreDir>
+    <InteropDir>$(GameDir)\BepInEx\interop</InteropDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="BepInEx.Core"><HintPath>$(CoreDir)\BepInEx.Core.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="BepInEx.Unity.IL2CPP"><HintPath>$(CoreDir)\BepInEx.Unity.IL2CPP.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Il2CppInterop.Runtime"><HintPath>$(CoreDir)\Il2CppInterop.Runtime.dll</HintPath><Private>false</Private></Reference>
+    <!-- interop 的元数据闭包（Roslyn 解析签名需要） -->
+    <Reference Include="Il2Cppmscorlib"><HintPath>$(InteropDir)\Il2Cppmscorlib.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Il2CppSystem"><HintPath>$(InteropDir)\Il2CppSystem.dll</HintPath><Private>false</Private></Reference>
+    <!-- Unity 模块 -->
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(InteropDir)\UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.SharedInternalsModule"><HintPath>$(InteropDir)\UnityEngine.SharedInternalsModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.UIModule"><HintPath>$(InteropDir)\UnityEngine.UIModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.UI"><HintPath>$(InteropDir)\UnityEngine.UI.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Unity.TextMeshPro"><HintPath>$(InteropDir)\Unity.TextMeshPro.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.ScreenCaptureModule"><HintPath>$(InteropDir)\UnityEngine.ScreenCaptureModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.ImageConversionModule"><HintPath>$(InteropDir)\UnityEngine.ImageConversionModule.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+
+</Project>

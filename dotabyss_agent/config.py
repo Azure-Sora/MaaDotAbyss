@@ -9,6 +9,7 @@ RUNS_DIR = LOCAL_DIR / "runs"
 
 GAME_TITLE = "ドットアビスX"
 WINDOW_SIZE = (1280, 720)
+GAME_DIR = Path(r"E:\Games\DMM\dotabyss_x_cl")   # 安装目录（BepInEx 桥发现文件所在地）
 
 MIMO_BASE_URL = "https://api.xiaomimimo.com/v1"
 MIMO_MODEL = "mimo-v2.5"
