@@ -28,6 +28,7 @@ class Candidate:
     y: int
     floor: int
     visible: bool = True   # 屏内可见；False=视口外（桥可按路径直点，模板兜底不可）
+    btn_path: str | None = None   # 桥直读：房间 Button 路径（enter_room 首选）
 
 
 @dataclass
@@ -132,6 +133,20 @@ def pick_heal(led: AbyssLedger) -> str:
 
 # ---- 事件拍板 ----------------------------------------------------------------
 
+def event_score(o: dict, led: AbyssLedger) -> float:
+    """事件选项打分（pick_event 内部用；锁定了 HP/侵蚀硬约束后也可单独比较选项）。"""
+    s = 0.0
+    if o.get("code_gain") and any(led.deficit(c) > 0 for c in COLORS):
+        s += 100.0
+    if o.get("item_gain"):
+        s += 40.0
+    if o.get("erosion_gain"):
+        s += 30.0 + o["erosion_gain"]
+    s -= 2.0 * o.get("erosion_cost", 0)
+    s -= 0.5 * o.get("coin_cost", 0)
+    return s
+
+
 def pick_event(options: list[dict], led: AbyssLedger) -> int:
     """事件必须选一项（X 不可跳过）。返回选项下标。
 
@@ -140,21 +155,9 @@ def pick_event(options: list[dict], led: AbyssLedger) -> int:
     两级过滤：
     - HP 代价 ≤ 战斗间剩余预算（战斗后清零——战斗基本回满，唯一死法是事件连扣归零）；
     - 侵蚀投影（当前 − 收益 + 代价）< 100 硬顶（暴毙线，无可协商）。
-    通过过滤后按 码收益 > 零成本收益 > 侵蚀代价小 打分；
+    通过过滤后按 event_score 打分；
     全不可行时 least-bad：先保 HP 再看侵蚀（事件强制选择，必须有产出）。
     """
-    def score(o: dict) -> float:
-        s = 0.0
-        if o.get("code_gain") and any(led.deficit(c) > 0 for c in COLORS):
-            s += 100.0
-        if o.get("item_gain"):
-            s += 40.0
-        if o.get("erosion_gain"):
-            s += 30.0 + o["erosion_gain"]
-        s -= 2.0 * o.get("erosion_cost", 0)
-        s -= 0.5 * o.get("coin_cost", 0)
-        return s
-
     def projected_erosion(o: dict) -> int:
         return led.erosion - o.get("erosion_gain", 0) + o.get("erosion_cost", 0)
 
@@ -162,7 +165,7 @@ def pick_event(options: list[dict], led: AbyssLedger) -> int:
                 if o.get("hp_cost", 0) <= led.hp_budget_left()
                 and projected_erosion(o) < 100]
     if feasible:
-        return max(feasible, key=lambda i: score(options[i]))
+        return max(feasible, key=lambda i: event_score(options[i], led))
     # 全不可行（逼近死局）：先保 HP 再看侵蚀
     return min(range(len(options)),
                key=lambda i: (options[i].get("hp_cost", 0),

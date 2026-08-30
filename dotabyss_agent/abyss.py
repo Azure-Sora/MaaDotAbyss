@@ -18,7 +18,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from .abyss_plan import AbyssLedger, Candidate, pick_code, pick_room, ticket_decision
+from .abyss_plan import AbyssLedger, Candidate, event_score, pick_code, pick_room, ticket_decision
+from .abyss_ui import _walk_path
 from .config import TASKS_DIR
 from .flow import match_anchor
 
@@ -95,9 +96,43 @@ def reveal_clipped_candidates(device) -> None:
 # ---- 房间解决（实机联调项，先立框架） ---------------------------------------
 
 
-def enter_room(device, room: Candidate) -> None:
-    device.click(room.x, room.y)
-    device.wait_settled(device.screenshot())
+def enter_room(device, room: Candidate, log=print) -> None:
+    """进房：屏内房间用射线式真实点击（部分房间入口只挂指针事件管线，
+    onClick.Invoke 是空操作——实测 2026-08-30）；屏外房间只能按路径 Invoke。
+    点完 3s 内场景/覆盖层必须有反应，否则换法重试一次。"""
+    attempts = []
+    if room.visible:
+        attempts += [("ray", room.x, room.y)]
+    if room.btn_path:
+        attempts.append(("path", room.btn_path, None))
+    if not room.visible and not room.btn_path:
+        attempts.append(("click", room.x, room.y))
+    last_err = "无可用点击方式"
+    for kind, a, b in attempts:
+        try:
+            if kind == "ray":
+                p = device.click_ui(a, b)
+                if "PullOut" in p or "Retreat" in p:
+                    raise RuntimeError(f"射线命中撤退按钮 {p}——立即停止")
+            elif kind == "path":
+                device.click_by_path(a)
+            else:
+                device.click(a, b)
+        except Exception as e:
+            last_err = f"{kind}: {e}"
+            continue
+        time.sleep(PACING)
+        device.wait_settled(device.screenshot())
+        time.sleep(1.5)
+        scene = _scene(device)
+        if scene != "Nether":
+            return
+        tree = device.ui_tree(max_nodes=6000)
+        if any(n.get("text") in ("確認", "確定") for n in _walk_all(tree)):
+            return
+        last_err = f"{kind} 点击无反应（场景仍 Nether）"
+        log(f"  [enter] {last_err}，换下一种方式")
+    raise RuntimeError(f"进房失败：{room.type} @ ({room.x},{room.y})——{last_err}")
 
 
 def resolve_room(device, room: Candidate, led: AbyssLedger, brain, log=print) -> None:
@@ -107,24 +142,32 @@ def resolve_room(device, room: Candidate, led: AbyssLedger, brain, log=print) ->
         led.hp_lost_pct = 0                    # 战斗回满，HP 预算清零
         resolve_battle(device, led, brain, log=log)
     elif room.type == "heal":
-        _choose_overlay_option(device, pick_heal_index(led), log)
-        led.erosion = max(0, led.erosion - 30)
+        _resolve_heal(device, led, log=log)
     elif room.type == "event":
         _resolve_event(device, led, brain, log)
     elif room.type == "treasure":
         _open_treasure(device, log)
     elif room.type == "shop":
         _close_shop(device, log)
+    time.sleep(PACING)
     led.floor += 1
 
 
 # ---- 战斗/结算流（实测 2026-08-30） ------------------------------------------
+
+PACING = 0.45   # 点击后节流：点太快会卡 LOADING（用户实测反馈）
 
 # 深渊代码名称 → 颜色（impact黄/rush红/safe蓝/risk紫）。
 # 来源：拿码后结算页明写「XXコード系統の恩恵ゲージ…」——自证后入册；
 # 未知名走 LLM 视觉定色（大方块=颜色种类，小菱形=效果种类，用户纠正 2026-08-30）。
 CODE_COLORS = {
     "疫壳": "risk",
+    "危险循环": "risk",    # 名带「危险」= リスク系（侵蚀≥70% 充能效率）
+    "安全释放": "safe",    # 名带「安全」= セーフ系（安全代码研究点+15%）
+    # 31F 特殊战斗掉落（监督定色 2026-08-30）：
+    "后排偏斜": "impact",
+    "深渊视界": "risk",
+    "狙击热忱": "rush",
 }
 
 
@@ -145,17 +188,21 @@ def resolve_battle(device, led: AbyssLedger, brain, log=print, timeout: float = 
     log(f"  战斗结束（{time.time() - t0:.0f}s），进入结算流")
     t0 = time.time()
     while time.time() - t0 < 120:
-        if _scene(device) == "Nether":
+        tree = device.ui_tree(max_nodes=12000)
+        if _gate_present(tree):
+            log("  检测到续行界面（Boss 层），交由主循环处理")
+            return
+        if tree.get("scene") == "Nether":
             log("  回到地图")
             return
-        _result_step(device, led, brain, log=log)
+        _result_step(device, led, brain, log=log, tree=tree)
         time.sleep(1.5)
     raise RuntimeError("结算流超时未回地图")
 
 
-def _result_step(device, led: AbyssLedger, brain, log=print) -> bool:
+def _result_step(device, led: AbyssLedger, brain, log=print, tree: dict | None = None) -> bool:
     """结算流的单步：代码弹窗 > 结算按钮 > 射线连点。返回是否有动作。"""
-    tree = device.ui_tree(max_nodes=12000)
+    tree = tree or device.ui_tree(max_nodes=12000)
     def walk(n):
         yield n
         for c in n.get("children", []):
@@ -164,7 +211,7 @@ def _result_step(device, led: AbyssLedger, brain, log=print) -> bool:
     for c0 in tree["canvases"]:
         for n in walk(c0):
             if n["name"].startswith("Popup_AbyssCodeSelect"):
-                _handle_code_popup(device, n, led, brain, log=log)
+                _handle_code_popup(device, led, brain, log=log)
                 return True
     # 2) 结算按钮（真实 Button）
     for c0 in tree["canvases"]:
@@ -190,32 +237,50 @@ def _result_step(device, led: AbyssLedger, brain, log=print) -> bool:
     return False
 
 
-def _handle_code_popup(device, popup, led: AbyssLedger, brain, log=print) -> None:
-    """深渊代码三选一：读选项→（注册表/LLM）定色→规划器择取→选+确定。"""
+def _handle_code_popup(device, led: AbyssLedger, brain, log=print) -> None:
+    """深渊代码三选一：读选项→（注册表/LLM）定色→规划器择取→选+确定。
+    卡片有入场滚动动画（名字/数值延迟出现，'+9999999' 是占位），读前先等出全。
+    名字在 AbyssCodeName/Text、描述在 TextArea/Text、战力在 PowerUP 下的 Value。"""
     def walk(n):
         yield n
         for c in n.get("children", []):
             yield from walk(c)
+
     options = []
-    for n in walk(popup):
-        m = re.match(r"Code_(\d)$", n["name"])
-        if not m:
-            continue
-        texts = [(x["name"], (x.get("text") or "").strip()) for x in walk(n)]
-        name = next((t for nm, t in texts if nm == "AbyssCodeName" and t), None)
-        desc = next((t for nm, t in texts if nm == "Text" and len(t) > 12), None)
-        pw = None
-        in_power = False
-        for nm, t in texts:
-            if nm == "TextTitle" and "戦力" in t:
-                in_power = True
-            elif in_power and nm == "Value" and t:
-                pw = t
-                break
-        options.append({"idx": int(m.group(1)), "name": name, "desc": desc, "power": pw,
-                        "screen": n.get("screen"),
-                        "color": CODE_COLORS.get(name) if name else None})
-    options.sort(key=lambda o: o["idx"])
+    popup = None
+    for _round in range(8):
+        tree = device.ui_tree(max_nodes=12000)
+        popup = next((n for n in _walk_all(tree)
+                      if n["name"].startswith("Popup_AbyssCodeSelect")), None)
+        if popup is None:
+            return   # 弹窗已消失
+        options = []
+        for n in walk(popup):
+            m = re.match(r"Code_(\d)$", n["name"])
+            if not m:
+                continue
+            name = desc = pw = None
+            for x, xp in _walk_path(n):
+                t = (x.get("text") or "").strip()
+                if not t:
+                    continue
+                if name is None and "/AbyssCodeName/Text" in xp:
+                    name = t
+                elif desc is None and "/TextArea/Text" in xp:
+                    desc = t
+                elif pw is None and "/PowerUP/" in xp and x["name"] == "Value":
+                    pw = t
+            options.append({"idx": int(m.group(1)), "name": name, "desc": desc, "power": pw,
+                            "screen": n.get("screen"),
+                            "color": CODE_COLORS.get(name) if name else None})
+        options.sort(key=lambda o: o["idx"])
+        if options and all(o["name"] and o["power"] and not o["power"].startswith("+")
+                           for o in options):
+            break
+        time.sleep(1.0)
+    if not options or popup is None:
+        log("  代码弹窗读取失败（选项/弹窗缺失）")
+        return
     if brain is not None:
         _classify_codes_vision(device, [o for o in options if o["color"] is None], brain, log=log)
     m = re.search(r"残り\s*(\d+)", json.dumps(
@@ -280,43 +345,316 @@ def _classify_codes_vision(device, options, brain, log=print) -> None:
             log(f"  视觉定色失败 {o['name']}: {e.__class__.__name__}")
 
 
-def pick_heal_index(led: AbyssLedger) -> int:
-    """浄化/休憩/変換 → 选项下标（覆盖层三张卡片从左到右 0/1/2）。"""
+def _walk_all(tree):
+    for c0 in tree.get("canvases", []):
+        def walk(n):
+            yield n
+            for c in n.get("children", []):
+                yield from walk(c)
+        yield from walk(c0)
+
+
+def _find_text_nodes(tree, keyword: str):
+    """[(node)]：TMP 文本包含关键词的节点（覆盖层选项/确认按钮定位用）。"""
+    return [n for n in _walk_all(tree)
+            if keyword in ((n.get("text") or ""))]
+
+
+def _click_text_center(device, tree, keyword: str, log=print) -> bool:
+    """射线点击包含关键词的文本节点中心（覆盖层按钮普遍非 Button 组件）。"""
+    for n in _find_text_nodes(tree, keyword):
+        s = n.get("screen")
+        if not s:
+            continue
+        cx, cy = (s[0] + s[2]) // 2, (s[1] + s[3]) // 2
+        try:
+            p = device.click_ui(cx, cy)
+        except Exception:
+            continue
+        if "PullOut" in p or "Retreat" in p:
+            raise RuntimeError(f"射线命中撤退按钮 {p}——立即停止")
+        log(f"  点击『{keyword}』({cx},{cy})")
+        return True
+    return False
+
+
+def _gate_present(tree) -> bool:
+    return any(n.get("text") and "続行する" in n["text"] for n in _walk_all(tree))
+
+
+def _resolve_heal(device, led: AbyssLedger, log=print) -> None:
+    """回复房三选一（浄化-30侵蚀 / 休憩+30%HP / 変換）——按 pick_heal 选卡+確定。"""
     from .abyss_plan import pick_heal
-    return {"purify": 0, "rest": 1, "convert": 2}[pick_heal(led)]
+    tree = device.ui_tree(max_nodes=12000)
+    verb = pick_heal(led)
+    kw = {"purify": "浄化", "rest": "休憩", "convert": "変換"}[verb]
+    if not _click_text_center(device, tree, kw, log=log):
+        raise RuntimeError(f"回复房未找到选项『{kw}』")
+    time.sleep(0.6)
+    tree2 = device.ui_tree(max_nodes=12000)
+    if not _click_text_center(device, tree2, "確定", log=log):
+        device.click_ui(639, 651)
+        log("  点击 確定(兜底坐标)")
+    if verb == "purify":
+        led.erosion = max(0, led.erosion - 30)
 
 
-def _run_auto_battle(device, log=print) -> None:
-    raise NotImplementedError("战斗序列待接线：AUTO/倍速锚点 + wait_stable + 结算收取")
+def _resolve_event(device, led: AbyssLedger, brain, log=print) -> None:
+    """事件房：选项效果标签按正则解析（机械化文案），兜底 LLM；pick_event 拍板。"""
+    from .abyss_plan import pick_event
+    tree = device.ui_tree(max_nodes=12000)
+    # 选项卡 = TitleText（标题）+ 同级 Text（效果标签），同 x 邻域归组
+    titles = [n for n in _walk_all(tree) if n["name"] == "TitleText" and n.get("text")]
+    texts = [n for n in _walk_all(tree) if n["name"] == "Text" and n.get("text")]
+    options = []
+    for t in titles:
+        if t["name"] != "TitleText" or not t.get("screen"):
+            continue
+        s0, s1 = t["screen"][0], t["screen"][2]   # 标题框即卡宽（防跨卡串文）
+        desc = ""
+        for x in texts:
+            if not x.get("screen"):
+                continue
+            xx = (x["screen"][0] + x["screen"][2]) / 2
+            if s0 - 20 <= xx <= s1 + 20 and x["screen"][1] >= t["screen"][1]:
+                desc += x["text"]
+        if desc:
+            options.append({"title": t["text"], "desc": desc, "screen": t["screen"]})
+    if not options:
+        raise RuntimeError("事件房未找到选项卡")
 
+    def parse(o):
+        d = o["desc"]
+        locked = "選択できません" in d or "選択できません" in o["title"]
+        m = re.search(r"浸食率\s*(\d+)\s*上昇", d)
+        ec = int(m.group(1)) if m else 0
+        m = re.search(r"浸食率\s*(\d+)\s*減少|浸食率\s*減少\s*(\d+)", d)
+        eg = int(m.group(1) or m.group(2) or 0) if m else 0
+        m = re.search(r"HP.*?(\d+)%\s*減少", d)
+        hp = int(m.group(1)) if m else 0
+        m = re.search(r"(\d+)\s*個消費", d)
+        coin = int(m.group(1)) if m else 0
+        return {"hp_cost": hp, "erosion_cost": ec, "erosion_gain": eg,
+                "coin_cost": coin, "locked": locked,
+                "code_gain": "コード" in d and "獲得" in d,
+                "item_gain": "アイテム" in d and "選択" in d}
 
-def _choose_overlay_option(device, index: int, log=print) -> None:
-    """覆盖层（回復/イベント/宝箱）选第 index 张卡 + 確定。选项卡位置待实测标定。"""
-    raise NotImplementedError("覆盖层选项卡坐标待实测标定")
-
-
-def _resolve_event(device, led, brain, log=print) -> None:
-    """LLM 读事件选项（效果标签）→ abyss_plan.pick_event → 选择。"""
-    raise NotImplementedError("事件弹窗 LLM 读取 prompt 待实机标定")
-
-
-def _open_treasure(device, log=print) -> None:
-    """被迫进宝箱：先试 X（不开离开，待实测），必须选则浸食+40（第三张卡）。"""
-    raise NotImplementedError("开箱 X 语义待实测")
+    parsed = [parse(o) for o in options]
+    open_opts = [(i, p) for i, p in enumerate(parsed) if not p["locked"]]
+    if not open_opts:      # 全部锁定：选代价最小的凑合过（事件强制选择）
+        i = min(range(len(options)),
+                key=lambda k: (parsed[k]["hp_cost"], parsed[k]["erosion_cost"]))
+    else:
+        i = max((k for k, p in enumerate(parsed) if not p["locked"]),
+                key=lambda k: event_score(parsed[k], led))
+    o = options[i]
+    log(f"  事件『{o['title']}』效果={o['desc'][:40]!r}"
+        + ("（锁定，备选）" if parsed[i]["locked"] else ""))
+    if not _click_text_center(device, tree, o["title"], log=log):
+        raise RuntimeError("事件选项点击失败")
+    time.sleep(0.6)
+    tree2 = device.ui_tree(max_nodes=12000)
+    if not _click_text_center(device, tree2, "確定", log=log):
+        device.click_ui(639, 651)
+        log("  点击 確定(兜底坐标)")
+    p = parse(o)
+    led.hp_lost_pct += p["hp_cost"]
+    led.erosion = max(0, led.erosion - p["erosion_gain"] + p["erosion_cost"])
+    led.coins = max(0, led.coins - p["coin_cost"])
+    if p["hp_cost"] == 0 and (p["erosion_cost"] or p["erosion_gain"]):
+        led.hp_lost_pct += 0
 
 
 def _close_shop(device, log=print) -> None:
-    """商店按 X 走人（用户确认）。"""
-    raise NotImplementedError("商店 X 坐标待实测标定")
+    """商店按 X 走人（用户确认）；X 非 Button 时射线探右上角。"""
+    tree = device.ui_tree(max_nodes=8000)
+    for suffix in ("Button_Close", "Popup_Close"):
+        try:
+            device.click_by_path(suffix)
+            log(f"  商店 {suffix}")
+            return
+        except Exception:
+            continue
+    for x, y in ((1214, 40), (1015, 100)):
+        try:
+            p = device.click_ui(x, y)
+            log(f"  商店 X ({x},{y})")
+            return
+        except Exception:
+            continue
+    raise RuntimeError("商店退出方式未找到")
 
 
-def boss_floor_continue(device, log=print) -> None:
-    """探索続行確認 → 続行する → 倍率弹窗（核验 1 倍）→ 使用 → 安全箱 → キャンセル。"""
-    for name in ("btn_continue.png", "btn_use.png", "btn_safecase_cancel.png"):
-        _anchor(name)  # 缺素材即报错
-    raise NotImplementedError("Boss 续行四连锚点坐标待实测标定")
+def _open_treasure(device, log=print) -> None:
+    """宝箱房（收益垃圾）：先试 X 不开离开；被迫开则选 浸食+40（绝不 HP/钥匙）。"""
+    tree = device.ui_tree(max_nodes=8000)
+    for suffix in ("Button_Close", "Popup_Close"):
+        try:
+            device.click_by_path(suffix)
+            log("  宝箱 X 离开")
+            return
+        except Exception:
+            continue
+    if _click_text_center(device, tree, "浸食", log=log):   # 浸食+40 选项
+        time.sleep(0.6)
+        tree2 = device.ui_tree(max_nodes=8000)
+        if not _click_text_center(device, tree2, "確定", log=log):
+            device.click_ui(639, 651)
+        led_erosion_note = 40
+        return
+    for x, y in ((1015, 100), (1214, 40)):
+        try:
+            device.click_ui(x, y)
+            log(f"  宝箱 X ({x},{y})")
+            return
+        except Exception:
+            continue
+    raise RuntimeError("宝箱房既不能 X 也没找到浸食选项——需人工看一眼")
 
 
-def reconcile(device, led: AbyssLedger, brain, log=print) -> None:
-    """HUD 对账：OCR/LLM 读 浸食率/层数/钥匙 → 与账本核对，失配挂起（教学模式通道）。"""
-    raise NotImplementedError("HUD 数字识别待实机标定")
+def boss_floor_continue(device, led: AbyssLedger, settle: bool, log=print) -> None:
+    """探索続行確認：settle=False → 続行する→倍率(核验1倍)→使用→安全箱キャンセル；
+    settle=True → 帰還する（就此结算，run 结束）。"""
+    tree = device.ui_tree(max_nodes=12000)
+    kw = "帰還する" if settle else "続行する"
+    if not _click_text_center(device, tree, kw, log=log):
+        raise RuntimeError(f"续行界面未找到『{kw}』")
+    if settle:
+        return
+    time.sleep(1.5)
+    # ゲットキー消費弹窗：核验倍率显示 1 倍再点使用
+    tree = device.ui_tree(max_nodes=12000)
+    texts = [n.get("text") or "" for n in _walk_all(tree)]
+    has_popup = any("ゲットキー" in t for t in texts)
+    mults = [t for t in texts if re.fullmatch(r"[123]\s*倍", t.strip())]
+    if has_popup and any(not t.strip().startswith("1") for t in mults):
+        raise RuntimeError(f"倍率不是 1 倍（{mults}）——中止续行，需人工核验")
+    if not _click_text_center(device, tree, "使用", log=log):
+        raise RuntimeError("倍率弹窗未找到『使用』")
+    led.getkeys = max(0, led.getkeys - 1)
+    time.sleep(1.5)
+    # 安全箱 → キャンセル
+    for attempt in range(6):
+        time.sleep(1.2)
+        tree = device.ui_tree(max_nodes=8000)
+        if _click_text_center(device, tree, "キャンセル", log=log):
+            return
+    raise RuntimeError("安全箱キャンセル未出现")
+
+
+def reconcile(device, led: AbyssLedger, log=print) -> dict:
+    """HUD 对账（HUD 为准回填账本）。返回差值。"""
+    from .abyss_ui import read_hud
+    hud = read_hud(device)
+    diff = {}
+    for k, v in hud.items():
+        old = getattr(led, k, None)
+        if old is not None and old != v:
+            diff[k] = (old, v)
+        setattr(led, k, v)
+    if diff:
+        log(f"  [对账] HUD 回填: {diff}")
+    return diff
+
+
+def _wait_map_stable(device, led: AbyssLedger | None = None, log=print) -> None:
+    """过渡动画期读数会跳（甚至 999999999 占位），连续两次 HUD 层数一致才算稳；
+    若长时间停在非地图场景，用结算步进拉回。"""
+    from .abyss_ui import read_hud
+    last = None
+    stuck = 0
+    for _ in range(16):
+        scene = _scene(device)
+        if scene != "Nether":
+            stuck += 1
+            if stuck >= 3:
+                _result_step(device, led, None, log=log)
+                stuck = 0
+            time.sleep(1.5)
+            last = None
+            continue
+        stuck = 0
+        try:
+            hud = read_hud(device)
+        except Exception:
+            time.sleep(1.5)
+            last = None
+            continue
+        if last is not None and hud.get("floor") == last.get("floor"):
+            return
+        last = hud
+        time.sleep(1.5)
+
+
+def _overlay_present(tree) -> bool:
+    """结算/事件结果类浮层（会挡住候选读取，须先排空）。"""
+    for n in _walk_all(tree):
+        t = n.get("text") or ""
+        if "確認して次へ" in t or "報酬獲得" in t or "QUEST CLEAR" in t \
+                or "アビスコードを獲得" in t:
+            return True
+    return False
+
+
+def _press_recenter(device, log=print) -> None:
+    """現在地へ：镜头归位到当前房间（屏外候选随镜头回中进入视口）。"""
+    tree = device.ui_tree(max_nodes=12000)
+    for n in _walk_all(tree):
+        if n["name"] == "Button_Reset" and "button" in n:
+            device.click_by_path(n["button"]["path"])
+            time.sleep(1.5)
+            return
+    log("  [recenter] 未找到 現在地へ 按钮")
+
+
+def run_to_floor(device, led: AbyssLedger, brain=None, log=print,
+                 max_rooms: int = 6) -> dict:
+    """监督式主循环：推进房间直到 max_rooms 或到达 target_floor 的续行点结算。"""
+    from .abyss_ui import read_candidates
+    rooms = 0
+    while rooms < max_rooms:
+        _wait_map_stable(device, led=led, log=log)
+        # 2) 续行界面（boss 层打完后出现；文本在截断线外，须 30000 全量）
+        tree = device.ui_tree(max_nodes=30000)
+        if _gate_present(tree):
+            settle = led.floor >= led.target_floor
+            log(f"  续行界面：{'帰還结算' if settle else '买票续行'}")
+            boss_floor_continue(device, led, settle=settle, log=log)
+            if settle:
+                return {"status": "settled", "floor": led.floor, "rooms": rooms}
+            time.sleep(2.0)
+            continue
+        # 2.5) 遗留结算/事件结果浮层（挡候选，先排空）
+        if _overlay_present(tree):
+            _result_step(device, led, brain, log=log, tree=tree)
+            time.sleep(1.5)
+            continue
+        # 3) 对账 + 候选（事件结算后房间解锁有延迟；无 MapCanvas=过渡期，重试）
+        reconcile(device, led, log=log)
+        cands = []
+        for _ in range(4):
+            try:
+                cands = read_candidates(device, current_floor=led.floor, log=log)
+            except RuntimeError as e:
+                log(f"  [read] {e}")
+                cands = []
+            if cands:
+                break
+            time.sleep(3.0)
+        if not cands:
+            return {"status": "no_candidates", "floor": led.floor, "rooms": rooms}
+        room = pick_room(cands, led)
+        if not room.visible:
+            # 屏外房 Invoke 可能无反应：歸位镜头后重选屏内最优
+            log(f"  最优 {room.type} 在屏外，現在地へ 归位后重选")
+            _press_recenter(device, log=log)
+            cands = read_candidates(device, current_floor=led.floor, log=log) or cands
+            vis = [c for c in cands if c.visible]
+            if vis:
+                room = pick_room(vis, led)
+        log(f"[{rooms + 1}] {led.floor}F 侵蚀{led.erosion} → {room.type} @ ({room.x},{room.y})")
+        enter_room(device, room, log=log)
+        resolve_room(device, room, led, brain, log=log)
+        rooms += 1
+        time.sleep(1.2)
+    return {"status": "rooms_exhausted", "floor": led.floor, "rooms": rooms}

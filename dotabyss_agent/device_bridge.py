@@ -102,12 +102,22 @@ class BridgeDevice:
     # ---- 感知 ---------------------------------------------------------
 
     def screenshot(self) -> np.ndarray:
-        """整屏 PNG（桥进程内回读）→ BGR ndarray。"""
-        png = bridge_post_bytes("screenshot", port=self.port)
-        img = cv2.imdecode(np.frombuffer(png, dtype=np.uint8), cv2.IMREAD_COLOR)
-        if img is None:
-            raise BridgeError("截图 PNG 解码失败")
-        return img
+        """整屏 PNG（桥进程内回读）→ BGR ndarray。场景切换瞬间渲染纹理可能
+        暂空（"截图纹理为空"），短重试渡过。"""
+        last: Exception | None = None
+        for _ in range(4):
+            try:
+                png = bridge_post_bytes("screenshot", port=self.port)
+                img = cv2.imdecode(np.frombuffer(png, dtype=np.uint8), cv2.IMREAD_COLOR)
+                if img is None:
+                    raise BridgeError("截图 PNG 解码失败")
+                return img
+            except BridgeError as e:
+                if "纹理为空" not in str(e):
+                    raise
+                last = e
+                time.sleep(1.0)
+        raise last or BridgeError("截图失败")
 
     def ui_tree(self, canvas: str | None = None, max_nodes: int = 4000) -> dict:
         """当前场景 Canvas 层级 JSON（节点名/坐标/尺寸/TMP文本/Button 路径）。

@@ -126,7 +126,8 @@ def read_candidates(device, current_floor: int | None = None, log=print) -> list
         x0, y0, x1, y1 = r["screen"]
         cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
         visible = -40 <= x0 and x1 <= 1320
-        cands.append(Candidate(r["type"], cx, cy, current_floor or -1, visible))
+        cands.append(Candidate(r["type"], cx, cy, current_floor or -1, visible,
+                               r.get("btn_path")))
     order = sorted(range(len(cands)),
                    key=lambda i: (not cands[i].visible, i))
     cands[:] = [cands[i] for i in order]
