@@ -164,6 +164,23 @@ class BridgeDevice:
         r = bridge_post("click", {"path": path}, port=self.port)
         return r.get("path", "")
 
+    def skip_page(self) -> str:
+        """无按钮翻页/结算提示（確認して次へ 等）：点屏幕最左上角整页跳过。
+
+        这类提示是纯文本、不是射线目标，click_at/click_ui 点原位置会穿透到底下
+        的按钮（探索報酬页实测 2026-08-30，曾误触下层入口）；左上角只会命中
+        全屏接管层。click_ui 优先（接管层未必是 Button），click_at 兜底。
+        """
+        for call in (self.click_ui, self.click):
+            try:
+                p = call(0, 0)
+            except Exception:
+                continue
+            if "PullOut" in p or "Retreat" in p:   # 铁律：绝不碰撤退
+                raise RuntimeError(f"命中撤退按钮 {p}——立即停止")
+            return p
+        raise BridgeError("左上角 (0,0) 未命中任何可点击层")
+
     def swipe(self, *args, **kwargs) -> None:
         raise BridgeError("桥后端暂不支持 swipe（需游戏侧拖拽映射，doc 13 §2.4）")
 

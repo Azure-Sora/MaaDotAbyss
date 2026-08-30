@@ -54,7 +54,8 @@ PREVIEW_W, PREVIEW_H = 512, 288   # 1280x720 缩放
 THUMB_W, THUMB_H = 160, 90        # 时间线缩略图
 MAX_CARDS = 120                   # 决策流保留步数
 
-ACTION_ZH = {"click": "点击 ", "wait": "等待 ", "wait_stable": "等待画面稳定", "report": "上报 → "}
+ACTION_ZH = {"click": "点击 ", "wait": "等待 ", "wait_stable": "等待画面稳定",
+             "report": "上报 → ", "skip": "左上角跳页"}
 
 
 class RunSignals(QObject):

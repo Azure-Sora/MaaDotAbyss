@@ -24,6 +24,8 @@ SYSTEM_PROMPT = """你是《DOT ABYSS》(ドットアビスX) 游戏的自动化
 
 确认弹窗规则：出现「自動分解確認」（装备达到上限、按自动分解设置分解装备）弹窗时，直接点「分解する」确认——用户已启用自动分解设置，这是授权行为。其他与任务目标一致的确认/继续类弹窗（领取、次へ、OK）按语义正常确认。
 
+翻页跳过规则：「確認して次へ」「タップして次へ」「QUEST CLEAR」等结算/报酬/翻页提示是纯文本而不是按钮——用 click 点这类文字会穿透到底下的按钮（实测曾误入抽卡页）。遇到这类"点击任意处继续"的提示页，一律用 skip 动作（点屏幕左上角整页跳过），不要 click 文字本身；连续 skip 两次画面仍无变化，按重复行为规则换其他控件或报告。
+
 【消费红线】凡是要求消耗资源/货币的购买、恢复、补充类确认弹窗（如「アビスジェム×Nを消費して挑戦回数を1回復させますか」等"消費して…ますか"句式，或購買/回復/購入字样），一律点「キャンセル」/「いいえ」/右上角X拒绝，绝不点「決定」/「購入」。免费次数打完即视为该任务完成。
 
 重复行为规则：若某按钮点击后画面毫无变化，不要在同一位置反复点击超过 2 次；换明显可用的控件（如关闭 X、キャンセル、确认按钮）或报告。
@@ -34,6 +36,7 @@ SYSTEM_PROMPT = """你是《DOT ABYSS》(ドットアビスX) 游戏的自动化
 
 输出格式——只输出一个 JSON 对象，禁止输出其他文字：
 {"thought": "一句话推理", "action": "click", "x": 100, "y": 200}
+{"thought": "一句话推理", "action": "skip", "reason": "跳过无按钮的翻页/结算提示页"}
 {"thought": "一句话推理", "action": "wait", "seconds": 3, "reason": "等待加载"}
 {"thought": "一句话推理", "action": "wait_stable", "timeout": 120, "reason": "等待战斗结束/加载完成（画面静止后自动返回）"}
 {"thought": "一句话推理", "action": "report", "status": "done或failed或blocked", "detail": "说明", "evidence": "画面上可见的完成/失败证据"}"""
@@ -110,7 +113,7 @@ class Brain:
             retry = content + [{
                 "type": "text",
                 "text": "你上一次的输出无法解析为 JSON。请严格只输出一个 JSON 对象"
-                        "（action 为 click/wait/wait_stable/report 之一），不要任何其他文字。",
+                        "（action 为 click/wait/wait_stable/skip/report 之一），不要任何其他文字。",
             }]
             return self._parse_json(self._chat(retry))
 
@@ -124,7 +127,7 @@ class Brain:
             )
         if history:
             lines.append("# 最近步骤（已裁剪）\n" + "\n".join(history))
-        lines.append("# 当前画面\n给出下一步 JSON（action 可为 click/wait/wait_stable/ask_user；仅网络错误才 report blocked）。")
+        lines.append("# 当前画面\n给出下一步 JSON（action 可为 click/wait/wait_stable/skip/ask_user；仅网络错误才 report blocked）。")
         content = [{"type": "text", "text": "\n\n".join(lines)}, self._image_part(frame_bgr)]
         try:
             return self._parse_json(self._chat(content, system=TEACH_SYSTEM_PROMPT))
@@ -132,7 +135,7 @@ class Brain:
             retry = content + [{
                 "type": "text",
                 "text": "你上一次的输出无法解析为 JSON。请严格只输出一个 JSON 对象"
-                        "（action 为 click/wait/wait_stable/ask_user/report 之一），不要任何其他文字。",
+                        "（action 为 click/wait/wait_stable/skip/ask_user/report 之一），不要任何其他文字。",
             }]
             return self._parse_json(self._chat(retry, system=TEACH_SYSTEM_PROMPT))
 

@@ -18,6 +18,22 @@ from .device import GameDevice
 COORD_LIMIT = (1280, 720)
 
 
+def forbidden_scene(device) -> str | None:
+    """禁区看门狗（桥后端专属）：点击后误入抽卡页时返回场景名，否则 None。
+
+    抽卡/亲密度页面是用户划定的绝对禁区；桥的按钮搜索型点击在无按钮浮层上
+    会穿透误触下层入口（2026-08-30 领挂机奖励实测差点进抽卡页），
+    故每次 click 后做场景级熔断，宁停勿进。
+    """
+    if not hasattr(device, "ui_tree"):
+        return None
+    try:
+        scene = str(device.ui_tree(max_nodes=10).get("scene", ""))
+    except Exception:
+        return None
+    return scene if "gacha" in scene.lower() else None
+
+
 def knowledge_path(task_id: str) -> Path:
     return KNOWLEDGE_DIR / f"{task_id}.md"
 
@@ -162,9 +178,23 @@ def run_task(
                     "thought": thought, "pre": str(pre_path.relative_to(run_dir)),
                 })
             device.wait_settled(frame)  # 等页面转场平息（慢加载的页面不再重复误点）
+            bad = forbidden_scene(device)
+            if bad:
+                log(f"[红线] 点击后误入禁区场景 {bad}——任务熔断，请人工退出该页面")
+                result.update(status="blocked", steps=step,
+                              detail=f"点击误入禁区场景 {bad}，已熔断（请人工退出）")
+                break
             history.append(f"step{step}: 点击({x},{y})｜{thought}")
             pending_click = (x, y, frame)
             prev_click = (x, y)
+
+        elif act == "skip":
+            # 无按钮翻页/结算提示（確認して次へ 等）：点文字会穿透，统一点左上角
+            device.skip_page()
+            device.wait_settled(frame)
+            history.append(f"step{step}: 左上角跳页｜{thought}")
+            pending_click = (0, 0, frame)
+            prev_click = (0, 0)
 
         elif act == "wait":
             s = min(float(action.get("seconds", 3)), 10.0)

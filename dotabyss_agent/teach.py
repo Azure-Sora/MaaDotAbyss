@@ -162,6 +162,14 @@ def run_teach_session(
             pending_click = (x, y, frame)
             prev_click = (x, y)
 
+        elif act == "skip":
+            # 无按钮翻页/结算提示（確認して次へ 等）：点文字会穿透，统一点左上角
+            device.skip_page()
+            device.wait_settled(frame)
+            history.append(f"step{step}: 左上角跳页｜{thought}")
+            pending_click = (0, 0, frame)
+            prev_click = (0, 0)
+
         elif act == "wait":
             s = min(float(action.get("seconds", 3)), 10.0)
             time.sleep(s)

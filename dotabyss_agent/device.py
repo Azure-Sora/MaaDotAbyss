@@ -90,6 +90,14 @@ class GameDevice:
             self.bring_to_front()
         self.ctrl.post_click(int(x), int(y)).wait()
 
+    def skip_page(self) -> None:
+        """无按钮翻页/结算提示（確認して次へ 等）：点客户区最左上角整页跳过。
+
+        这类提示是纯文本；真实点击本就不会穿透（穿透是桥按钮搜索型点击的问题，
+        见 device_bridge.skip_page）。
+        """
+        self.click(2, 2)
+
     def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 400) -> None:
         """拖拽（按住左键滑动）。深渊地图横向卷动用；起点终点为 1280x720 客户区坐标。"""
         if not self.is_foreground():
