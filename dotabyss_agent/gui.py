@@ -21,8 +21,8 @@ from pathlib import Path
 from collections import deque
 
 import numpy as np
-from PySide6.QtCore import QObject, QRectF, QSize, Qt, Signal, QTimer
-from PySide6.QtGui import QFont, QIcon, QImage, QPainter, QPixmap, QTextCursor
+from PySide6.QtCore import QFile, QObject, QRectF, QSize, Qt, Signal, QTimer
+from PySide6.QtGui import QFont, QFontMetrics, QIcon, QImage, QPainter, QPixmap, QTextCursor
 from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QListWidgetItem, QToolButton, QVBoxLayout, QWidget)
 from qfluentwidgets import (
@@ -51,6 +51,7 @@ from qfluentwidgets import (
     setTheme,
 )
 from qfluentwidgets.components.widgets.spin_box import SpinButton, SpinIcon
+from qfluentwidgets.common.style_sheet import isDarkTheme
 
 from .config import ROOT
 from .modelstore import discover_models, store
@@ -148,6 +149,20 @@ class _VSpinButton(SpinButton):
                                           (self.height() - 10) / 2, 10, 10))
 
 
+def _apply_spin_qss(box):
+    """库的 spin_box.qss 为默认横排按钮预留了 80px 右内边距（按钮列本身只有 28px），
+    窄框下输入区被压得只剩 ~20px、数字被裁——换成贴合竖排按钮列的 padding。
+    库 qss 同时承担背景/边框/hover 样式，故整体取回改写而非简单覆盖。"""
+    theme = "dark" if isDarkTheme() else "light"
+    f = QFile(f":/qfluentwidgets/qss/{theme}/spin_box.qss")
+    text = f.open(QFile.ReadOnly) and bytes(f.readAll()).decode()
+    if "padding: 0px 80px 0 10px" in text:
+        text = text.replace("padding: 0px 80px 0 10px", "padding: 0px 34px 0 10px")
+    else:    # 库改版兜底：同优先级覆盖规则，后来者胜
+        text += "\nQSpinBox, QDoubleSpinBox { padding: 0px 34px 0 10px; }"
+    box.setStyleSheet(text)
+
+
 def _stack_spin_buttons(box):
     """把 InlineSpinBoxBase 横排的上下按钮替换为右侧竖排一列。"""
     for b in (box.upButton, box.downButton):
@@ -165,9 +180,23 @@ def _stack_spin_buttons(box):
     col.addWidget(box.downButton)
     box.hBoxLayout.addLayout(col)
     box.hBoxLayout.setAlignment(col, Qt.AlignRight | Qt.AlignVCenter)
+    _apply_spin_qss(box)
 
 
-class VSpinBox(SpinBox):
+class _FitMinMixin:
+    """最小宽度按「最大值文本完整可见」计算。
+
+    库的 minimumSizeHint 跟着 qss 的大 padding 走（虚高 ~40px/框），七个框排在
+    默认 1100px 窗宽下必然溢出；这里给出真实下限，布局压缩时数字不裁字。
+    """
+
+    def minimumSizeHint(self):
+        fm = QFontMetrics(self.font())
+        text = self.textFromValue(self.maximum()) + self.suffix()
+        return QSize(fm.horizontalAdvance(text) + 46, 33)
+
+
+class VSpinBox(_FitMinMixin, SpinBox):
     """上下箭头竖排成列的 SpinBox，窄框也能显示数字。"""
 
     def __init__(self, parent=None):
@@ -175,7 +204,7 @@ class VSpinBox(SpinBox):
         _stack_spin_buttons(self)
 
 
-class VDoubleSpinBox(DoubleSpinBox):
+class VDoubleSpinBox(_FitMinMixin, DoubleSpinBox):
     """同 VSpinBox，浮点版。"""
 
     def __init__(self, parent=None):
@@ -771,11 +800,11 @@ class AbyssPage(QWidget):
         self.refresh_providers()
         c.addWidget(self.provider)
 
-        # ---- 参数 ----
+        # ---- 参数（两行：三个数值一行，四色配额一行——单行在 1100px 默认窗宽放不下）----
         cfg = CardWidget()
-        g = QHBoxLayout(cfg)
-        g.setContentsMargins(16, 10, 16, 10)
-        g.setSpacing(8)
+        gv = QVBoxLayout(cfg)
+        gv.setContentsMargins(16, 10, 16, 10)
+        gv.setSpacing(6)
         self.target = VSpinBox()
         self.target.setRange(1, 200)
         self.target.setValue(40)
@@ -785,21 +814,28 @@ class AbyssPage(QWidget):
         self.max_rooms = VSpinBox()
         self.max_rooms.setRange(1, 200)
         self.max_rooms.setValue(30)
+        row1 = QHBoxLayout()
+        row1.setSpacing(6)
         for label, w in (("目标层", self.target), ("起始检查点", self.start_floor),
                          ("房间上限", self.max_rooms)):
-            g.addWidget(BodyLabel(label))
-            g.addWidget(w)
-        g.addStretch(1)
-        g.addWidget(BodyLabel("代码配额"))
+            row1.addWidget(BodyLabel(label))
+            row1.addWidget(w)
+        row1.addStretch(1)
+        gv.addLayout(row1)
+        row2 = QHBoxLayout()
+        row2.setSpacing(6)
+        row2.addWidget(BodyLabel("代码配额"))
         self.quota_spins: dict[str, VSpinBox] = {}
         for color, zh in QUOTA_ZH:
             sp = VSpinBox()
             sp.setRange(0, 31)
             self.quota_spins[color] = sp
-            g.addWidget(BodyLabel(zh))
-            g.addWidget(sp)
+            row2.addWidget(BodyLabel(zh))
+            row2.addWidget(sp)
         self.quota_spins["safe"].setValue(6)
         self.quota_spins["rush"].setValue(3)
+        row2.addStretch(1)
+        gv.addLayout(row2)
 
         # ---- 账本 ----
         ledger_card = CardWidget()
@@ -1721,6 +1757,9 @@ class MainWindow(FluentWindow):
         # 模型页变更 → 任务/深渊/教学三页下拉联动
         self.state.sig.providers_changed.connect(self._refresh_provider_combos)
         self._refresh_provider_combos()
+
+        # 1100px 默认窗宽下深渊参数行才放得下：侧栏保持图标模式，不自动展开
+        self.navigationInterface.setMinimumExpandWidth(1200)
 
         self.resize(1100, 720)
         self.setMinimumSize(960, 640)
