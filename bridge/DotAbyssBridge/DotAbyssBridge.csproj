@@ -9,8 +9,9 @@
     <Version>0.1.0</Version>
     <CopyLocalLockFileAssemblies>false</CopyLocalLockFileAssemblies>
     <NoWarn>CS0436;CS0648;CS0109;CS0626;IDE0051;IDE1006</NoWarn>
-    <!-- 游戏目录可用 -p:GameDir=... 覆盖 -->
-    <GameDir Condition="'$(GameDir)' == ''">E:\Games\DMM\dotabyss_x_cl</GameDir>
+    <!-- 游戏目录：-p:GameDir=... 或环境变量 DOTABYSS_GAME_DIR；
+         本机路径不入仓库，也可放 bridge/Directory.Build.props（gitignore） -->
+    <GameDir Condition="'$(GameDir)' == '' and '$(DOTABYSS_GAME_DIR)' != ''">$(DOTABYSS_GAME_DIR)</GameDir>
     <CoreDir>$(GameDir)\BepInEx\core</CoreDir>
     <InteropDir>$(GameDir)\BepInEx\interop</InteropDir>
   </PropertyGroup>

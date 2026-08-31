@@ -20,9 +20,10 @@ import time
 from collections import deque
 
 import numpy as np
-from PySide6.QtCore import QObject, Qt, Signal, QTimer
-from PySide6.QtGui import QFont, QImage, QPixmap, QTextCursor
-from PySide6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidgetItem, QVBoxLayout, QWidget
+from PySide6.QtCore import QObject, QRectF, QSize, Qt, Signal, QTimer
+from PySide6.QtGui import QFont, QImage, QPainter, QPixmap, QTextCursor
+from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit,
+                               QListWidgetItem, QToolButton, QVBoxLayout, QWidget)
 from qfluentwidgets import (
     BodyLabel,
     CaptionLabel,
@@ -37,6 +38,7 @@ from qfluentwidgets import (
     ListWidget,
     MessageBox,
     MessageBoxBase,
+    PasswordLineEdit,
     PrimaryPushButton,
     PushButton,
     SmoothScrollArea,
@@ -47,8 +49,9 @@ from qfluentwidgets import (
     TitleLabel,
     setTheme,
 )
+from qfluentwidgets.components.widgets.spin_box import SpinButton, SpinIcon
 
-from .config import ACTIVE_PROVIDER, PROVIDERS
+from .modelstore import discover_models, store
 from .control import CtlError, ControlServer, SHOTS_DIR, save_frame
 from .device import DeviceError
 from .runner import load_tasks, run_selected
@@ -74,6 +77,7 @@ class RunSignals(QObject):
     think = Signal(dict)            # 教学模式 {"phase":"start"/"done","tokens":int|None}
     ctl_call = Signal(object)       # 控制面：HTTP 线程投递到 GUI 线程执行的闭包
     ledger = Signal(dict)           # 深渊账本快照 {floor, erosion, keys, coins, 四色码}
+    providers_changed = Signal()    # 模型页增删改后，三页模型下拉联动刷新
 
 
 class RunState:
@@ -115,6 +119,66 @@ def frame_to_pixmap(frame) -> QPixmap | None:
     arr = np.ascontiguousarray(frame)
     img = QImage(arr.data, arr.shape[1], arr.shape[0], arr.shape[1] * 3, QImage.Format_BGR888)
     return QPixmap.fromImage(img)
+
+
+# ---- 竖排步进按钮的 SpinBox ----------------------------------------------
+# 库里的 InlineSpinBoxBase 把两个 31×23 的箭头按钮横排在框右侧（合计约 70px），
+# 深渊页参数框只有 110px 宽，数字区被挤没。这里换成竖排小按钮（24×16×2）。
+
+
+class _VSpinButton(SpinButton):
+    """缩小的步进按钮；父类把图标坐标写死，缩小后需自行居中绘制。"""
+
+    def __init__(self, icon: SpinIcon, parent=None):
+        super().__init__(icon, parent)
+        self.setFixedSize(24, 16)
+
+    def paintEvent(self, e):
+        QToolButton.paintEvent(self, e)
+        painter = QPainter(self)
+        painter.setRenderHints(QPainter.Antialiasing |
+                               QPainter.SmoothPixmapTransform)
+        if not self.isEnabled():
+            painter.setOpacity(0.36)
+        elif self.isPressed:
+            painter.setOpacity(0.7)
+        self._icon.render(painter, QRectF((self.width() - 10) / 2,
+                                          (self.height() - 10) / 2, 10, 10))
+
+
+def _stack_spin_buttons(box):
+    """把 InlineSpinBoxBase 横排的上下按钮替换为右侧竖排一列。"""
+    for b in (box.upButton, box.downButton):
+        box.hBoxLayout.removeWidget(b)
+        b.deleteLater()
+    box.upButton = _VSpinButton(SpinIcon.UP, box)
+    box.downButton = _VSpinButton(SpinIcon.DOWN, box)
+    box.upButton.clicked.connect(box.stepUp)
+    box.downButton.clicked.connect(box.stepDown)
+    box.hBoxLayout.setContentsMargins(0, 0, 4, 0)
+    col = QVBoxLayout()
+    col.setContentsMargins(0, 0, 0, 0)
+    col.setSpacing(0)
+    col.addWidget(box.upButton)
+    col.addWidget(box.downButton)
+    box.hBoxLayout.addLayout(col)
+    box.hBoxLayout.setAlignment(col, Qt.AlignRight | Qt.AlignVCenter)
+
+
+class VSpinBox(SpinBox):
+    """上下箭头竖排成列的 SpinBox，窄框也能显示数字。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        _stack_spin_buttons(self)
+
+
+class VDoubleSpinBox(DoubleSpinBox):
+    """同 VSpinBox，浮点版。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        _stack_spin_buttons(self)
 
 
 # ---- 决策流时间线 -------------------------------------------------------
@@ -344,12 +408,11 @@ class TaskPage(QWidget):
         self.btn_stop.setEnabled(False)
 
         self.provider = ComboBox()
-        self.provider.addItems(list(PROVIDERS))
-        self.provider.setCurrentText(ACTIVE_PROVIDER)
-        self.max_steps = SpinBox()
+        self.refresh_providers()
+        self.max_steps = VSpinBox()
         self.max_steps.setRange(1, 200)
         self.max_steps.setValue(30)
-        self.budget = DoubleSpinBox()
+        self.budget = VDoubleSpinBox()
         self.budget.setRange(30, 7200)
         self.budget.setValue(420)
         self.budget.setDecimals(0)
@@ -414,6 +477,14 @@ class TaskPage(QWidget):
         self._think_t0 = 0.0
         self._think_timer = QTimer(self)
         self._think_timer.timeout.connect(self._tick_thinking)
+
+    def refresh_providers(self):
+        """模型页变更后重建下拉项；尽量保持当前选择。"""
+        cur = self.provider.currentText()
+        names = store.names()
+        self.provider.clear()
+        self.provider.addItems(names)
+        self.provider.setCurrentText(cur if cur in names else store.active())
 
     def _fill_tasks(self):
         for t in load_tasks():
@@ -695,8 +766,7 @@ class AbyssPage(QWidget):
         c.addStretch(1)
         c.addWidget(BodyLabel("模型"))
         self.provider = ComboBox()
-        self.provider.addItems(list(PROVIDERS))
-        self.provider.setCurrentText(ACTIVE_PROVIDER)
+        self.refresh_providers()
         c.addWidget(self.provider)
 
         # ---- 参数 ----
@@ -704,13 +774,13 @@ class AbyssPage(QWidget):
         g = QHBoxLayout(cfg)
         g.setContentsMargins(16, 10, 16, 10)
         g.setSpacing(8)
-        self.target = SpinBox()
+        self.target = VSpinBox()
         self.target.setRange(1, 200)
         self.target.setValue(40)
-        self.start_floor = SpinBox()
+        self.start_floor = VSpinBox()
         self.start_floor.setRange(1, 100)
         self.start_floor.setValue(20)
-        self.max_rooms = SpinBox()
+        self.max_rooms = VSpinBox()
         self.max_rooms.setRange(1, 200)
         self.max_rooms.setValue(30)
         for label, w in (("目标层", self.target), ("起始检查点", self.start_floor),
@@ -719,9 +789,9 @@ class AbyssPage(QWidget):
             g.addWidget(w)
         g.addStretch(1)
         g.addWidget(BodyLabel("代码配额"))
-        self.quota_spins: dict[str, SpinBox] = {}
+        self.quota_spins: dict[str, VSpinBox] = {}
         for color, zh in QUOTA_ZH:
-            sp = SpinBox()
+            sp = VSpinBox()
             sp.setRange(0, 31)
             self.quota_spins[color] = sp
             g.addWidget(BodyLabel(zh))
@@ -778,6 +848,14 @@ class AbyssPage(QWidget):
         state.sig.running.connect(self._on_running)
 
     # ---- 启停 ----
+
+    def refresh_providers(self):
+        """模型页变更后重建下拉项；尽量保持当前选择。"""
+        cur = self.provider.currentText()
+        names = store.names()
+        self.provider.clear()
+        self.provider.addItems(names)
+        self.provider.setCurrentText(cur if cur in names else store.active())
 
     def _start(self):
         if self.state.worker and self.state.worker.is_alive():
@@ -971,8 +1049,7 @@ class TeachPage(QWidget):
         self.in_name = QLineEdit()
         self.in_name.setPlaceholderText("任务名（中文）")
         self.provider = ComboBox()
-        self.provider.addItems(list(PROVIDERS))
-        self.provider.setCurrentText(ACTIVE_PROVIDER)
+        self.refresh_providers()
         self.btn_start = PrimaryPushButton(FIF.PLAY, "开始教学")
         row1.addWidget(self.in_id, 3)
         row1.addWidget(self.in_name, 2)
@@ -1064,6 +1141,14 @@ class TeachPage(QWidget):
         self.preview.setPixmap(
             pix.scaled(PREVIEW_W, PREVIEW_H, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         )
+
+    def refresh_providers(self):
+        """模型页变更后重建下拉项；尽量保持当前选择。"""
+        cur = self.provider.currentText()
+        names = store.names()
+        self.provider.clear()
+        self.provider.addItems(names)
+        self.provider.setCurrentText(cur if cur in names else store.active())
 
     def _on_chat(self, ev: dict):
         self._add_bubble(ev.get("role", "system"), str(ev.get("text", "")))
@@ -1284,6 +1369,229 @@ def call_in_gui(state: RunState, fn, timeout: float = 5.0):
     return payload
 
 
+class ModelPage(QWidget):
+    """模型管理：OpenAI 兼容 provider 增删改、密钥保存、/models 自动发现。
+
+    配置落在 .local/providers.json（gitignore），仓库只留内置种子；
+    增删改后发 providers_changed，任务/深渊/教学三页的模型下拉联动刷新。
+    """
+
+    _discovered = Signal(list, str)     # 发现完成：模型 id 列表 / 错误信息
+
+    def __init__(self, state: RunState, parent=None):
+        super().__init__(parent)
+        self.setObjectName("modelPage")
+        self.state = state
+        self._editing: str | None = None    # 正在编辑的 provider 名（None=新增）
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 24, 24, 12)
+        lay.setSpacing(10)
+        head = QHBoxLayout()
+        head.addWidget(TitleLabel("模型"))
+        head.addStretch(1)
+        head.addWidget(CaptionLabel("OpenAI 兼容接口；密钥只存 .local，不随仓库提交"))
+        lay.addLayout(head)
+
+        # ---- provider 列表 ----
+        list_card = CardWidget()
+        lv = QVBoxLayout(list_card)
+        lv.setContentsMargins(12, 8, 12, 8)
+        lv.setSpacing(4)
+        self.list_box = QVBoxLayout()
+        self.list_box.setSpacing(4)
+        lv.addLayout(self.list_box)
+        lay.addWidget(list_card)
+
+        # ---- 编辑器 ----
+        edit_card = CardWidget()
+        ev = QVBoxLayout(edit_card)
+        ev.setContentsMargins(16, 10, 16, 10)
+        ev.setSpacing(6)
+        self.edit_hint = CaptionLabel("新增")
+        ev.addWidget(self.edit_hint)
+        self.in_name = LineEdit()
+        self.in_name.setPlaceholderText("名称标识（任务页模型下拉里显示的名字，如 deepseek）")
+        self.in_base = LineEdit()
+        self.in_base.setPlaceholderText("Base URL（OpenAI 兼容，如 https://api.example.com/v1）")
+        r1 = QHBoxLayout()
+        r1.addWidget(self.in_name, 2)
+        r1.addWidget(self.in_base, 5)
+        ev.addLayout(r1)
+        self.in_key = PasswordLineEdit()
+        self.in_key.setPlaceholderText("API Key（sk-…，明文保存到 .local/providers.json）")
+        self.btn_discover = PushButton(FIF.SEARCH, "发现模型")
+        r2 = QHBoxLayout()
+        r2.addWidget(self.in_key, 3)
+        r2.addWidget(self.btn_discover)
+        ev.addLayout(r2)
+        self.in_model = LineEdit()
+        self.in_model.setPlaceholderText("模型名（手动填写，或点发现后从下拉选）")
+        self.cb_remote = ComboBox()
+        self.cb_remote.setMinimumWidth(240)
+        self.cb_remote.currentTextChanged.connect(
+            lambda t: self.in_model.setText(t) if t else None)
+        r3 = QHBoxLayout()
+        r3.addWidget(self.in_model, 3)
+        r3.addWidget(self.cb_remote, 2)
+        ev.addLayout(r3)
+        btns = QHBoxLayout()
+        self.btn_save = PrimaryPushButton(FIF.SAVE, "保存")
+        self.btn_reset = PushButton("清空表单")
+        btns.addWidget(self.btn_save)
+        btns.addWidget(self.btn_reset)
+        btns.addStretch(1)
+        ev.addLayout(btns)
+        lay.addWidget(edit_card)
+        lay.addStretch(1)
+
+        self.btn_discover.clicked.connect(self._discover)
+        self.btn_save.clicked.connect(self._save)
+        self.btn_reset.clicked.connect(self._reset_form)
+        self._discovered.connect(self._on_discovered)
+        self._reset_form()
+        self._rebuild_list()
+
+    # ---- 列表 ----------------------------------------------------------
+
+    def _rebuild_list(self):
+        while self.list_box.count():
+            it = self.list_box.takeAt(0)
+            if w := it.widget():
+                w.deleteLater()
+        for name in store.names():
+            self.list_box.addWidget(self._row(name))
+        if not store.names():
+            self.list_box.addWidget(CaptionLabel("暂无 provider，用下方表单添加"))
+
+    def _row(self, name: str) -> QWidget:
+        cfg = store.get(name)
+        row = QFrame()
+        h = QHBoxLayout(row)
+        h.setContentsMargins(8, 2, 8, 2)
+        h.setSpacing(8)
+        h.addWidget(StrongBodyLabel(name))
+        h.addWidget(CaptionLabel(f"{cfg['model']}  ·  {cfg['base_url']}  ·  {store.key_desc(name)}"), 1)
+        if name == store.active():
+            tag = PrimaryPushButton("主力")
+            tag.setEnabled(False)
+            h.addWidget(tag)
+        else:
+            b_act = PushButton("设为主力")
+            b_act.clicked.connect(lambda _, n=name: self._set_active(n))
+            h.addWidget(b_act)
+        b_edit = PushButton(FIF.EDIT, "编辑")
+        b_edit.clicked.connect(lambda _, n=name: self._edit(n))
+        h.addWidget(b_edit)
+        b_del = PushButton(FIF.DELETE, "删除")
+        b_del.clicked.connect(lambda _, n=name: self._remove(n))
+        h.addWidget(b_del)
+        return row
+
+    # ---- 动作 ----------------------------------------------------------
+
+    def _set_active(self, name: str):
+        store.set_active(name)
+        self._changed()
+        InfoBar.success("已切换主力", f"新任务默认使用 {name}",
+                        parent=self, position=InfoBarPosition.TOP, duration=3000)
+
+    def _edit(self, name: str):
+        cfg = store.get(name)
+        self._editing = name
+        self.edit_hint.setText(f"正在编辑 {name}（名称不可改，改名请新增后删除旧的）")
+        self.in_name.setText(name)
+        self.in_name.setReadOnly(True)
+        self.in_base.setText(cfg["base_url"])
+        self.in_model.setText(cfg["model"])
+        self.in_key.clear()
+        self.in_key.setPlaceholderText(f"API Key（留空保持原密钥：{store.key_desc(name)}）")
+
+    def _remove(self, name: str):
+        box = MessageBox("删除 provider", f"确定删除「{name}」？\n（.local 里的密钥文件不会被动）",
+                         self.window())
+        if not box.exec():
+            return
+        try:
+            store.remove(name)
+        except (ValueError, KeyError) as e:
+            InfoBar.warning("删除失败", str(e),
+                            parent=self, position=InfoBarPosition.TOP, duration=4000)
+            return
+        if self._editing == name:
+            self._reset_form()
+        self._changed()
+
+    def _discover(self):
+        base_url = self.in_base.text().strip()
+        key = self.in_key.text().strip()
+        if not base_url.startswith(("http://", "https://")):
+            InfoBar.warning("提示", "先填 Base URL（http(s):// 开头）",
+                            parent=self, position=InfoBarPosition.TOP, duration=3000)
+            return
+        # 编辑已有 provider 且没填新 key：沿用旧密钥去发现
+        if not key and self._editing:
+            try:
+                key = store.key(self._editing)
+            except (KeyError, OSError):
+                key = ""
+        self.btn_discover.setEnabled(False)
+        self.btn_discover.setText("发现中…")
+        threading.Thread(target=self._discover_work, args=(base_url, key), daemon=True).start()
+
+    def _discover_work(self, base_url: str, key: str):
+        try:
+            self._discovered.emit(discover_models(base_url, key), "")
+        except Exception as e:
+            self._discovered.emit([], f"{e.__class__.__name__}: {e}")
+
+    def _on_discovered(self, models: list, err: str):
+        self.btn_discover.setEnabled(True)
+        self.btn_discover.setText("发现模型")
+        self.cb_remote.clear()
+        if err:
+            InfoBar.error("发现失败", err[:160],
+                          parent=self, position=InfoBarPosition.TOP, duration=-1)
+            return
+        self.cb_remote.addItems(models)
+        InfoBar.success("发现成功", f"共 {len(models)} 个模型，下拉选择自动填入模型名",
+                        parent=self, position=InfoBarPosition.TOP, duration=3000)
+
+    def _save(self):
+        old = None
+        if self._editing:
+            try:
+                old = store.get(self._editing)
+            except KeyError:
+                old = None
+        try:
+            store.upsert(
+                self.in_name.text(), self.in_base.text(), self.in_model.text(),
+                api_key=self.in_key.text(),
+                key_path=(old or {}).get("key_path", ""))
+        except (ValueError, KeyError) as e:
+            InfoBar.warning("保存失败", str(e),
+                            parent=self, position=InfoBarPosition.TOP, duration=4000)
+            return
+        name = self.in_name.text().strip()
+        self._changed()
+        InfoBar.success("已保存", f"{name} 已写入 .local/providers.json",
+                        parent=self, position=InfoBarPosition.TOP, duration=3000)
+
+    def _reset_form(self):
+        self._editing = None
+        self.edit_hint.setText("新增")
+        self.in_name.setReadOnly(False)
+        for w in (self.in_name, self.in_base, self.in_model, self.in_key):
+            w.clear()
+        self.in_key.setPlaceholderText("API Key（sk-…，明文保存到 .local/providers.json）")
+        self.cb_remote.clear()
+
+    def _changed(self):
+        self._rebuild_list()
+        self.state.sig.providers_changed.emit()
+
+
 class GuiCtlAdapter:
     """GUI 引擎能力 → ControlServer 命令表。方法在 HTTP 线程执行，
     碰 Qt 控件的部分经 call_in_gui marshal 到 GUI 线程。"""
@@ -1339,8 +1647,8 @@ class GuiCtlAdapter:
         unknown = [i for i in ids if i not in known]
         if unknown:
             raise CtlError(f"未知任务: {', '.join(unknown)}")
-        provider = params.get("provider") or ACTIVE_PROVIDER
-        if provider not in PROVIDERS:
+        provider = params.get("provider") or store.active()
+        if provider not in store.names():
             raise CtlError(f"未知 provider: {provider}")
         max_steps = max(1, int(params.get("max_steps", 30)))
         budget = max(30.0, float(params.get("time_budget", 420.0)))
@@ -1400,15 +1708,25 @@ class MainWindow(FluentWindow):
         self.tasks = TaskPage(self.state, self.monitor)
         self.abyss = AbyssPage(self.state)
         self.teach = TeachPage(self.state, self.tasks)
+        self.models = ModelPage(self.state)
 
         self.addSubInterface(self.tasks, FIF.PLAY, "任务")
         self.addSubInterface(self.abyss, FIF.GLOBE, "深渊")
         self.addSubInterface(self.monitor, FIF.CAMERA, "监控")
         self.addSubInterface(self.teach, FIF.ADD, "新建任务")
+        self.addSubInterface(self.models, FIF.ROBOT, "模型")
+
+        # 模型页变更 → 任务/深渊/教学三页下拉联动
+        self.state.sig.providers_changed.connect(self._refresh_provider_combos)
+        self._refresh_provider_combos()
 
         self.resize(1100, 720)
         self.setMinimumSize(960, 640)
         self.setWindowTitle("DotAbyss Agent")
+
+    def _refresh_provider_combos(self):
+        for page in (self.tasks, self.abyss, self.teach):
+            page.refresh_providers()
 
         # 控制面：本进程承载引擎，CLI 经 .local/ctl.json 附着（docs/research/13）
         self.ctl = GuiCtlAdapter(self.state, self.tasks, self)
@@ -1425,7 +1743,8 @@ class MainWindow(FluentWindow):
         for sig in (self.state.sig.log, self.state.sig.frame, self.state.sig.step,
                     self.state.sig.result, self.state.sig.running,
                     self.state.sig.chat, self.state.sig.tstate, self.state.sig.think,
-                    self.state.sig.ctl_call, self.state.sig.ledger):
+                    self.state.sig.ctl_call, self.state.sig.ledger,
+                    self.state.sig.providers_changed):
             try:
                 sig.disconnect()
             except RuntimeError:

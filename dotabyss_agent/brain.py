@@ -8,11 +8,8 @@ import numpy as np
 from openai import OpenAI
 from PIL import Image
 
-from .config import (
-    MAX_COMPLETION_TOKENS,
-    PROVIDERS,
-    ACTIVE_PROVIDER,
-)
+from .config import MAX_COMPLETION_TOKENS
+from .modelstore import store
 
 SYSTEM_PROMPT = """你是《DOT ABYSS》(ドットアビスX) 游戏的自动化操作助手，通过截图观察画面并给出下一步操作。
 
@@ -96,11 +93,11 @@ class BrainError(RuntimeError):
 
 class Brain:
     def __init__(self, provider: str | None = None):
-        cfg = PROVIDERS[provider or ACTIVE_PROVIDER]
-        key = cfg["key_path"].read_text(encoding="utf-8-sig").strip()
-        self.client = OpenAI(api_key=key, base_url=cfg["base_url"])
+        name = provider or store.active()
+        cfg = store.get(name)
+        self.client = OpenAI(api_key=store.key(name), base_url=cfg["base_url"])
         self.model = cfg["model"]
-        self.provider = provider or ACTIVE_PROVIDER
+        self.provider = name
 
     # ---- 基础调用 -----------------------------------------------------
 

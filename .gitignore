@@ -4,3 +4,8 @@ _refs/
 __pycache__/
 poc/*_out/
 poc/abyss_map_ui.json
+
+# C# 构建产物与本机覆盖（游戏安装目录）
+bin/
+obj/
+bridge/Directory.Build.props

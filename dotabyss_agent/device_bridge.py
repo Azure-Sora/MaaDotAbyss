@@ -15,7 +15,7 @@ import numpy as np
 
 from .config import GAME_DIR
 
-BRIDGE_JSON = GAME_DIR / "BepInEx" / "bridge.json"
+BRIDGE_JSON = GAME_DIR / "BepInEx" / "bridge.json" if GAME_DIR else None
 DEFAULT_PORT = 27124
 
 
