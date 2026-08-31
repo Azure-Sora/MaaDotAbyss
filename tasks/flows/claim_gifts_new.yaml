@@ -1,0 +1,34 @@
+name: 新领取礼物
+steps:
+- name: 点击礼物按钮进入礼物页
+  find:
+    anchor: s1.png
+    threshold: 0.94
+  retry: 2
+  act: click
+  expect:
+    change_above: 0.03
+- name: 点击一键领取全部礼物
+  find:
+    anchor: s2.png
+    threshold: 0.94
+  retry: 2
+  act: click
+  expect:
+    change_above: 0.03
+- name: 点击OK确认领取结果
+  find:
+    anchor: s3.png
+    threshold: 0.94
+  retry: 2
+  act: click
+  expect:
+    change_above: 0.03
+- name: 点击关闭退出礼物页
+  find:
+    anchor: s4.png
+    threshold: 0.94
+  retry: 2
+  act: click
+  expect:
+    change_above: 0.03
