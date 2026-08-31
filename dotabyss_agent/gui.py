@@ -17,11 +17,12 @@ import queue
 import sys
 import threading
 import time
+from pathlib import Path
 from collections import deque
 
 import numpy as np
 from PySide6.QtCore import QObject, QRectF, QSize, Qt, Signal, QTimer
-from PySide6.QtGui import QFont, QImage, QPainter, QPixmap, QTextCursor
+from PySide6.QtGui import QFont, QIcon, QImage, QPainter, QPixmap, QTextCursor
 from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QListWidgetItem, QToolButton, QVBoxLayout, QWidget)
 from qfluentwidgets import (
@@ -51,6 +52,7 @@ from qfluentwidgets import (
 )
 from qfluentwidgets.components.widgets.spin_box import SpinButton, SpinIcon
 
+from .config import ROOT
 from .modelstore import discover_models, store
 from .control import CtlError, ControlServer, SHOTS_DIR, save_frame
 from .device import DeviceError
@@ -1752,8 +1754,18 @@ class MainWindow(FluentWindow):
         super().closeEvent(event)
 
 
+def _load_app_icon(app: QApplication):
+    """窗口/任务栏图标：源码态取仓库 packaging/icon.png，exe 态取打包资源。"""
+    icon_path = ROOT / "packaging" / "icon.png"
+    if getattr(sys, "frozen", False) and not icon_path.exists():
+        icon_path = Path(sys._MEIPASS) / "icon.png"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
+
+
 def main():
     app = QApplication(sys.argv)
+    _load_app_icon(app)
     setTheme(Theme.DARK)
     w = MainWindow()
     w.show()

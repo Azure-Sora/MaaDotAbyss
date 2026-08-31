@@ -25,9 +25,13 @@ jobs:
           pip install -r requirements.txt
           pip install pyinstaller
 
+      - name: 生成 exe 图标
+        run: python -c "import os; os.makedirs('build', exist_ok=True); from PIL import Image; Image.open('packaging/icon.png').save('build/icon.ico', sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+
       - name: 打包 GUI exe（PyInstaller）
         run: >
           pyinstaller --onefile --windowed --noconfirm --name DotAbyssAgent
+          --icon build/icon.ico --add-data "packaging/icon.png;."
           --collect-all qfluentwidgets --collect-all maa
           --exclude-module matplotlib
           run_gui.py
