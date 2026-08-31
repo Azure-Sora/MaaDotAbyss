@@ -1,0 +1,32 @@
+{
+ "routine": "generic_sweep",
+ "name": "disaster_skip_sweep",
+ "params": {
+  "home_scene": "DisasterTop",
+  "targets": {
+   "canvas": "UICanvas",
+   "btn_suffix": "Disaster/RootUI",
+   "btn_contains": null,
+   "exclude_path": [
+    "/Sp"
+   ],
+   "text_must": null,
+   "text_not": [],
+   "require_text": true,
+   "interactable_only": true,
+   "max_targets": 1
+  },
+  "click_chain": [
+   "{target.path}",
+   "!Popup_QuestDetail_Disaster(Clone)/Box/Contents/Popup_ButtonSet3/Button_Confirm",
+   "Popup_Confirm_NoteButton2(Clone)/Box/Contents/Popup_ButtonSet2/Button_Confirm"
+  ],
+  "after_each": "battle",
+  "finish_chain": [
+   "{pending.path}",
+   "!Popup_QuestDetail_Disaster(Clone)/Box/Contents/Popup_ButtonSet3/Button_Skip",
+   "!Popup_Confirm_SkipSimple(Clone)/Box/Contents/Popup_ButtonSet2/Button_Confirm"
+  ],
+  "popup_timeout": 8.0
+ }
+}

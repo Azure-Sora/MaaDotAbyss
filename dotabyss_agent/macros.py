@@ -16,6 +16,30 @@ RESULT_SCENES = {"ExploreResult", "DisasterResult"}
 FORBIDDEN_BTN = ("PullOut", "Retreat")
 
 
+def observe_buttons(device, canvas=None, suffix="", contains="", text="",
+                    max_rows: int = 40) -> tuple[str, list[str]]:
+    """observe 动作后端：读树 → 紧凑按钮表（LLM 拿路径的按需通道）。
+
+    返回 (场景名, 行列表, 总匹配数)，行形如 "✓ 完整路径｜可见文本"。
+    过滤参数全可省，但按钮多时必须过滤（全场景 ~110 条，截断到 max_rows）。
+    collect_buttons 已排除 FORBIDDEN_BTN（撤退类），禁区路径还有 agent 层黑名单兜底。
+    """
+    tree = device.ui_tree(max_nodes=30000)
+    scene_name = str(tree.get("scene", ""))
+    rows = []
+    for b in collect_buttons(tree, canvas=canvas):
+        p = str(b["path"])
+        if suffix and not p.endswith(suffix):
+            continue
+        if contains and contains not in p:
+            continue
+        t = str(b["text"])
+        if text and text not in t:
+            continue
+        rows.append(f"{'✓' if b['interactable'] else '✗'} {p}｜{t}")
+    return scene_name, rows[:max_rows], len(rows)
+
+
 def scene(device) -> str:
     try:
         return str(device.ui_tree(max_nodes=10).get("scene", ""))

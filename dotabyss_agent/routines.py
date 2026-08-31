@@ -13,6 +13,7 @@ from .macros import (
     battle_and_return, click_path, collect_buttons, collect_texts, find_btn,
     popup_cancel_consume, scene, walk,
 )
+from .sweep_dsl import generic_sweep, load_saved_routines, save_program
 
 COUNTRIES = ("Milesgard", "Peldion", "Eldorana", "Coalition", "Luxnova")
 
@@ -22,10 +23,32 @@ SUSPECT_LIMIT = 2   # 连续 N 场"计数未递减"视为异常，交还 LLM
 # ---- 通用小件 -----------------------------------------------------------
 
 def _popup_btn_wait(device, suffix: str, timeout: float = 8.0) -> str | None:
-    """轮询等待某弹窗按钮出现且可点，返回路径。"""
+    """轮询等待某弹窗按钮出现且可点，返回路径。
+
+    等待期间处理打断弹窗：消费红线（キャンセル）、自动分解确认（分解する=
+    授权行为）、通行证里程结算（纯通知，关闭）——2026-08-31 实测这些会插在
+    出撃确认链中间，不处理会白白等超时。
+    """
     t0 = time.time()
     while time.time() - t0 < timeout:
-        for b in collect_buttons(device.ui_tree(max_nodes=30000)):
+        tree = device.ui_tree(max_nodes=30000)
+        front = collect_buttons(tree, canvas="Front")
+        cancel = popup_cancel_consume(tree)
+        if cancel:
+            click_path(device, cancel)
+            time.sleep(1.2)
+            continue
+        b = find_btn(front, text="分解する")
+        if b:
+            click_path(device, b["path"])
+            time.sleep(1.2)
+            continue
+        b = find_btn(front, name_suffix="Popup_MileageResult(Clone)/Box/Popup_Close")
+        if b:
+            click_path(device, b["path"])
+            time.sleep(1.2)
+            continue
+        for b in collect_buttons(tree):
             if b["path"].endswith(suffix) and b["interactable"]:
                 return b["path"]
         time.sleep(0.8)
@@ -194,7 +217,8 @@ def disaster_sweep(device, log=print, stop_event=None, frame_cb=None,
         if not click_path(device, boss["btn"]):
             return {"status": "partial", "cleared": cleared, "detail": "点 boss 失败"}
         p = _popup_btn_wait(
-            device, "Popup_QuestDetail_Disaster(Clone)/Box/Contents/Popup_ButtonSet2/Button_Confirm")
+            # 2026-08-31 游戏更新：详情弹窗按钮组 ButtonSet2→ButtonSet3（キャンセル/スキップ/出撃）
+            device, "Popup_QuestDetail_Disaster(Clone)/Box/Contents/Popup_ButtonSet3/Button_Confirm")
         if not p:
             suspect += 1
             if suspect >= SUSPECT_LIMIT:
@@ -348,3 +372,40 @@ ROUTINES = {
     "disaster_sweep": disaster_sweep,
     "expedition_sweep": expedition_sweep,
 }
+
+
+# ---- 注册表（统一签名 + LLM 编排的已存 routine） ---------------------------
+#
+# 统一调用契约：fn(device, params, *, log, stop_event, frame_cb)。
+# 三个手写 sweep 不吃 params（经适配器忽略）；generic_sweep 与
+# tasks/routines/*.json 里的已存编排吃 params（已存的可在调用时覆盖个别字段）。
+
+
+def _adap(fn):
+    def wrapper(device, params=None, *, log=print, stop_event=None, frame_cb=None, **_):
+        return fn(device, log=log, stop_event=stop_event, frame_cb=frame_cb)
+    wrapper.__name__ = fn.__name__
+    return wrapper
+
+
+ROUTINES = {
+    "forces_sweep": _adap(forces_sweep),
+    "disaster_sweep": _adap(disaster_sweep),
+    "expedition_sweep": _adap(expedition_sweep),
+    "generic_sweep": generic_sweep,
+}
+
+
+def reload_saved() -> None:
+    """把 tasks/routines/*.json 的已存编排并入注册表（新存盘后调用）。"""
+    ROUTINES.update(load_saved_routines())
+
+
+def save_and_register(name: str, params: dict) -> str:
+    """存盘编排并即刻注册；返回文件路径字符串。名称/参数不合法抛 ValueError。"""
+    f = save_program(name, params)
+    reload_saved()
+    return str(f)
+
+
+reload_saved()   # 进程启动即加载已存编排（LLM 可按名直调）

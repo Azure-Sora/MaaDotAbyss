@@ -14,6 +14,7 @@ from .device import DeviceError
 from .device_select import get_device
 from .flow import run_flow
 from .precondition import check_precondition
+from .taskfile import update_task
 
 
 def load_tasks() -> list[dict]:
@@ -107,9 +108,29 @@ def run_selected(
         )
         _finish(r)
         log(f"[{r['status']}] {r['task']} steps={r['steps']} {r['detail']}")
+        if r["status"] == "done" and t.get("supplement"):
+            _consume_supplement(t, brain, log=log)
         if r["status"] == "blocked":
             blocked = True
             log("!! 疑似 403/网络错误，已停止全部任务，请人工检查游戏。")
             break
 
     return results
+
+
+def _consume_supplement(t: dict, brain: Brain, log=print) -> None:
+    """任务带补充情报且执行成功 → 模型改稿合入 prompt 并清空 supplement 字段。
+
+    合稿失败（解析异常/结果过短）不动文件，supplement 留着下次成功后再试。
+    """
+    sup = str(t.get("supplement") or "").strip()
+    if not sup:
+        return
+    log(f"[supplement] 「{t['id']}」执行成功，正在把补充情报合入任务指令…")
+    try:
+        new_prompt = brain.merge_supplement(t.get("name", t["id"]), t["prompt"], sup)
+        update_task(t["id"], prompt=new_prompt, supplement="")
+        log(f"[supplement] 已合入并清空「{t['id']}」的补充情报（下次执行按新指令走）")
+    except Exception as e:
+        log(f"[supplement] 合入失败（{e.__class__.__name__}: {e}），"
+            f"补充情报保留，下次执行成功后再试")

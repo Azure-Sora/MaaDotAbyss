@@ -14,8 +14,8 @@ from PIL import Image
 from .brain import Brain, BrainError
 from .config import HISTORY_KEEP, KNOWLEDGE_DIR, RUNS_DIR
 from .device import GameDevice
-from .macros import wait_transition_done
-from .routines import ROUTINES
+from .macros import observe_buttons, wait_transition_done
+from .routines import ROUTINES, save_and_register
 
 COORD_LIMIT = (1280, 720)
 
@@ -34,6 +34,10 @@ def forbidden_scene(device) -> str | None:
     except Exception:
         return None
     return scene if "gacha" in scene.lower() else None
+
+
+# click_path 路径级黑名单：模型给的路径绝不允许指向禁区入口（防线在场景熔断之前）
+PATH_BLACKLIST = ("Gacha", "ガチャ", "親密", "好感", "PullOut", "Retreat")
 
 
 def knowledge_path(task_id: str) -> Path:
@@ -96,6 +100,9 @@ def run_task(
     tid = task["id"]
     run_dir = RUNS_DIR / datetime.now().strftime("%Y%m%d_%H%M%S") / tid
     knowledge = load_knowledge(tid)
+    # 用户补充情报（daily.yaml 的 supplement 字段）：本次执行的最高优先级情报，
+    # 成功后由 runner._consume_supplement 合入 prompt 并清空
+    supplement = str(task.get("supplement") or "").strip()
     history: list[str] = []
     result = {"task": tid, "status": "error", "steps": 0, "detail": ""}
     t0 = time.time()
@@ -150,7 +157,8 @@ def run_task(
 
         _emit_thinking(event_cb, "start")
         try:
-            action = brain.decide(task["prompt"], knowledge, history, frame)
+            action = brain.decide(task["prompt"], knowledge, history, frame,
+                                  supplement=supplement)
             parse_errors = 0
         except BrainError as e:
             parse_errors += 1
@@ -217,6 +225,70 @@ def run_task(
             pending_click = (x, y, frame)
             prev_click = (x, y)
 
+        elif act == "observe":
+            # 按需读 UI 树拿按钮路径（桥后端专属）；过滤参数省略会被截断提醒
+            if not hasattr(device, "ui_tree"):
+                history.append(f"step{step}: [observe] 当前设备后端不支持 UI 树"
+                               f"（仅桥后端可用），请改用截图判断")
+                continue
+            try:
+                scene_name, rows, total = observe_buttons(
+                    device,
+                    canvas=str(action.get("canvas") or "") or None,
+                    suffix=str(action.get("suffix") or ""),
+                    contains=str(action.get("contains") or ""),
+                    text=str(action.get("text") or ""),
+                )
+            except Exception as e:
+                history.append(f"step{step}: [observe] 读树失败 {e.__class__.__name__}: {e}")
+                continue
+            lines = [f"step{step}: [observe] scene={scene_name} "
+                     f"按钮{total}条" + ("" if total <= len(rows) else f"（已截断至{len(rows)}条）")]
+            lines += [f"  {r}" for r in rows]
+            if total > len(rows):
+                lines.append("  …其余未列出，请加 canvas/suffix/contains/text 过滤再 observe")
+            history.append("\n".join(lines))
+            log(f"step{step}: [observe] scene={scene_name} 按钮{total}条")
+
+        elif act == "click_path":
+            # 按 observe 拿到的完整路径精确点击（onClick.Invoke，不穿透）；
+            # 红线与 click 同款：转场等待 + 禁区场景熔断 + 路径级黑名单
+            if not hasattr(device, "click_by_path"):
+                history.append(f"step{step}: [click_path] 当前设备后端不支持路径点击"
+                               f"（仅桥后端可用）")
+                continue
+            path = str(action.get("path", "")).strip()
+            bad = next((k for k in PATH_BLACKLIST if k in path), None)
+            if not path or bad:
+                history.append(f"step{step}: [click_path] 路径为空或含禁区关键词"
+                               f"（{bad or '空'}），拒绝")
+                continue
+            try:
+                device.click_by_path(path)
+                hit = True
+            except Exception as e:
+                hit = False
+                err = str(e)
+            if not hit:
+                history.append(f"step{step}: [click_path 未命中] {path}（{err}）"
+                               f"——路径可能已过期，请重新 observe")
+                continue
+            device.wait_settled(frame)
+            if not wait_transition_done(device):
+                log("[红线] 转场动画未结束（疑似卡屏），停止后续点击，请人工检查游戏")
+                result.update(status="blocked", steps=step,
+                              detail="转场 loading 疑似卡死，已熔断（请人工恢复）")
+                break
+            bad = forbidden_scene(device)
+            if bad:
+                log(f"[红线] 点击后误入禁区场景 {bad}——任务熔断，请人工退出该页面")
+                result.update(status="blocked", steps=step,
+                              detail=f"点击误入禁区场景 {bad}，已熔断（请人工退出）")
+                break
+            history.append(f"step{step}: 点路径 …/{path.split('/')[-1]}｜{thought}")
+            pending_click = (0, 0, frame)
+            prev_click = (0, 0)
+
         elif act == "skip":
             # 无按钮翻页/结算提示（確認して次へ 等）：点文字会穿透，统一点左上角
             device.skip_page()
@@ -241,20 +313,32 @@ def run_task(
             history.append(f"step{step}: 等待稳定({'达成' if ok else '超时'})｜{thought}")
 
         elif act == "auto":
-            # 程序接管连打（docs/research/14）：LLM 导航到入口页后把重复段交程序
+            # 程序接管连打（docs/research/14）：LLM 导航到入口页后把重复段交程序；
+            # generic_sweep 及已存编排由 LLM 编排 params（sweep_dsl 解释执行）
             rid = str(action.get("routine", ""))
             fn = ROUTINES.get(rid)
             if fn is None:
                 history.append(f"step{step}: [auto] 未知 routine {rid}"
                                f"（可用: {', '.join(ROUTINES)}）")
                 continue
-            log(f"step{step}: [auto {rid}] 程序接管连打开始")
+            log(f"step{step}: [auto {rid}] 程序接管开始")
             auto_t0 = time.time()
             try:
-                res = fn(device, log=log, stop_event=stop_event, frame_cb=frame_cb)
+                res = fn(device, action.get("params") or {}, log=log,
+                         stop_event=stop_event, frame_cb=frame_cb)
             except Exception as e:  # routine 内部异常不当任务失败，交 LLM 决断
                 res = {"status": "partial", "cleared": 0,
                        "detail": f"{e.__class__.__name__}: {e}"}
+            # 编排跑通且要求存盘 → 注册为命名 routine 供下次直呼
+            if (res.get("status") == "done" and str(action.get("save_as") or "")):
+                try:
+                    f = save_and_register(str(action["save_as"]),
+                                          action.get("params") or {})
+                    log(f"[auto] 编排已存盘注册: {f}")
+                    history.append(f"step{step}: [auto] 编排已存盘为 routine "
+                                   f"「{action['save_as']}」，下次可直接按名调用")
+                except Exception as e:
+                    log(f"[auto] 编排存盘失败: {e}")
             # 程序段耗时（战斗连打可达数分钟）不占 LLM 决策预算：整体后移计费起点
             t0 += time.time() - auto_t0
             status = res.get("status")

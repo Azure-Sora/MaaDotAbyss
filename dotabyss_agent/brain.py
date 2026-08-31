@@ -43,6 +43,33 @@ SYSTEM_PROMPT = """你是《DOT ABYSS》(ドットアビスX) 游戏的自动化
 （继续任务剩余步骤，如返回主页）；partial=中途交还（按 detail 决定接手或换目标）。
 还没走到入口页、或入口页都没打开时，绝不要猜页面内容或凭空调 auto。
 
+观察与精确操作（桥后端专属；动作被拒提示"仅桥后端可用"时，退回截图判断+click）：
+observe——按需读 UI 树拿按钮真实路径：画面看不清、找不到可点目标、或编排 auto 之前必用。
+{"thought": "一句话推理", "action": "observe", "canvas": "UICanvas", "suffix": "路径后缀", "text": "按钮文本含字"}
+返回：scene 名 + 按钮表（可点✓/灰✗、完整路径、可见文本）。四个参数都可省，但全量列表会截断，
+务必带过滤。scene 名是编排 auto 时 home_scene 的唯一可靠来源。
+click_path——按 observe 输出里的完整路径精确点击：
+{"thought": "一句话推理", "action": "click_path", "path": "UICanvas/…/Button_Confirm"}
+只点 observe 输出中存在的完整路径；未命中（路径过期）会提示重新 observe。
+
+编排式 auto（generic_sweep）：通用扫荡解释器，没有现成 routine 的清剿/领取流程由你编排。
+先 observe 确认入口 scene 名、目标按钮与各弹窗按钮的真实路径，再发：
+{"thought": "一句话推理", "action": "auto", "routine": "generic_sweep",
+ "save_as": "小写下划线名（可选，done 后自动存盘，下次按名直调）",
+ "params": {"home_scene": "observe 顶部的 scene 名",
+   "targets": {"canvas": "UICanvas", "btn_suffix": "目标按钮路径后缀",
+               "exclude_path": ["要排除的路径子串"], "max_targets": 3},
+   "click_chain": ["{target.path}", "!必须出现的弹窗后缀", "可选弹窗后缀"],
+   "after_each": "battle 或 none", "finish_chain": ["打完后的收尾按钮后缀"]}}
+- 语义：校验场景 → 循环{选第一个匹配目标 → 按 click_chain 逐项点击（非首项轮询等弹窗
+  出现再点，"!"前缀必须出现否则中止，默认等 popup_timeout 秒跳过）→ battle=跑战斗宏回家 /
+  none=不战斗 → 重读确认进展，连续 2 次无进展中止} → 打完（达 max_targets 或无目标）且
+  至少清掉 1 个 → 执行 finish_chain → 回报。
+- after_each:"none" 适合纯领取类；finish_chain 用于打完后的跳过/领奖等收尾点击。
+- 已存盘的编排直接 {"action":"auto","routine":"名字"} 调用，可在 params 里覆盖个别字段。
+- 参数不合法会回 partial+detail 指明错处，修正后重发；cleared=0 的 done 表示没找到
+  待清目标（可能本来就清完了，也可能筛选条件不匹配——先 observe 核对）。
+
 输出格式——只输出一个 JSON 对象，禁止输出其他文字：
 {"thought": "一句话推理", "action": "click", "x": 100, "y": 200}
 {"thought": "一句话推理", "action": "skip", "reason": "跳过无按钮的翻页/结算提示页"}
@@ -106,9 +133,17 @@ class Brain:
 
     # ---- 决策 ---------------------------------------------------------
 
-    def decide(self, task_prompt: str, knowledge: str, history: list[str], frame_bgr: np.ndarray) -> dict:
-        """给定任务、知识卡、最近步骤历史和当前帧，返回下一个动作 JSON。"""
+    def decide(self, task_prompt: str, knowledge: str, history: list[str], frame_bgr: np.ndarray,
+               supplement: str = "") -> dict:
+        """给定任务、知识卡、最近步骤历史和当前帧，返回下一个动作 JSON。
+
+        supplement：用户补充情报（如版本更新后的新机制），与任务描述冲突时以它为准。
+        """
         lines = [f"# 当前任务\n{task_prompt}"]
+        if supplement:
+            lines.append(
+                "# 用户补充情报（用户刚写入的最新情报，可能尚未合入上面的任务描述；"
+                "与任务描述冲突时以这里为准，本次执行按它调整做法）\n" + supplement)
         if knowledge:
             lines.append(f"# 任务知识卡（历史探索结论，优先参考）\n{knowledge}")
         if history:
@@ -196,6 +231,30 @@ class Brain:
             "（按钮位置描述、日文词、需要等待的动画等）。用简短条目列表，不超过 12 条，只输出列表本身。"
         )
         return self._chat([{"type": "text", "text": prompt}]).strip()
+
+    def merge_supplement(self, task_name: str, task_prompt: str, supplement: str) -> str:
+        """任务成功后把用户补充情报增量合入任务 prompt（改稿），返回新 prompt 全文。
+
+        用户口述的少量新情报（如版本更新后的新机制）不值得手工重写整个任务，
+        由模型在"已按情报成功执行过一次"的前提下改稿：只动相关段落，其余逐字保留。
+        """
+        raw = self._chat([{"type": "text", "text": (
+            f"# 任务：{task_name}\n\n"
+            f"# 现有任务指令（改稿对象）\n{task_prompt}\n\n"
+            f"# 用户补充情报（游戏改版后的新事实，本次执行已按它成功完成）\n{supplement}\n\n"
+            "请把补充情报合入上面的任务指令，输出更新后的完整任务指令：\n"
+            "- 纯文本输出，不要 JSON、不要代码围栏、不要任何解释；\n"
+            "- 保持原文结构与行文风格（步骤式描述、含弹窗与异常的处理、以回到主页/停留页收尾）；\n"
+            "- 只改动与补充情报相关的部分，其余内容逐字保留；\n"
+            "- 与补充情报冲突的旧机制描述要替换成新机制，不要新旧并存；\n"
+            "- 不添加原文和补充情报之外的猜测。"
+        )}]).strip()
+        if raw.startswith("```"):           # 个别模型爱加代码围栏
+            raw = re.sub(r"^```[^\n]*\n?", "", raw)
+            raw = re.sub(r"\n?```\s*$", "", raw).strip()
+        if len(raw) < max(30, len(task_prompt) * 2 // 5):
+            raise BrainError(f"改稿结果过短（{len(raw)} 字符），疑似丢内容，放弃合入")
+        return raw
 
     def read_json_from_image(self, frame_bgr: np.ndarray, instruction: str) -> dict:
         """对（裁剪过的）局部截图做定向识读，返回模型给出的 JSON。

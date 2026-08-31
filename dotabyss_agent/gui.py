@@ -33,7 +33,10 @@ from qfluentwidgets import (
     FluentWindow,
     InfoBar,
     InfoBarPosition,
+    LineEdit,
     ListWidget,
+    MessageBox,
+    MessageBoxBase,
     PrimaryPushButton,
     PushButton,
     SmoothScrollArea,
@@ -49,6 +52,7 @@ from .config import ACTIVE_PROVIDER, PROVIDERS
 from .control import CtlError, ControlServer, SHOTS_DIR, save_frame
 from .device import DeviceError
 from .runner import load_tasks, run_selected
+from .taskfile import TaskFileError, delete_task, reorder_tasks, update_task
 
 PREVIEW_W, PREVIEW_H = 512, 288   # 1280x720 缩放
 THUMB_W, THUMB_H = 160, 90        # 时间线缩略图
@@ -259,6 +263,66 @@ class MonitorPage(QWidget):
 # ---- 任务页 --------------------------------------------------------------
 
 
+class TaskEditDialog(MessageBoxBase):
+    """任务编辑卡：任务名 / 任务指令 / 完成判据 / 补充情报。
+
+    补充情报是给模型的临时情报（如版本更新后的新机制）：本次执行按它为准，
+    任务成功后由模型把合入任务指令并自动清空本字段。
+    """
+
+    def __init__(self, task: dict, parent=None):
+        super().__init__(parent)
+        self.task = task
+        # 卡片定宽 720：宽度只能设在 self.widget（居中卡片）上——
+        # 设在 self 会把全屏遮罩层一起钉死，不再随主窗口缩放（基类
+        # eventFilter 靠监听主窗口 Resize 同步自身尺寸）
+        self.widget.setFixedWidth(720)
+
+        self.titleLabel = StrongBodyLabel(f"编辑任务：{task['id']}")
+        self.in_name = LineEdit()
+        self.in_name.setText(task.get("name", ""))
+        self.in_name.setClearButtonEnabled(True)
+        self.in_prompt = TextEdit()
+        self.in_prompt.setPlainText(str(task.get("prompt", "")))
+        self.in_prompt.setFixedHeight(190)
+        self.in_exit = TextEdit()
+        self.in_exit.setPlainText(str(task.get("exit_condition", "")))
+        self.in_exit.setFixedHeight(64)
+        self.in_sup = TextEdit()
+        self.in_sup.setPlainText(str(task.get("supplement", "")))
+        self.in_sup.setPlaceholderText(
+            "补充情报（可留空）：给模型的最新情报，如「今天更新后打完一个 boss 可直接跳过其余两个并领奖励」。"
+            "本次执行以它为准；成功一次后模型会把它合入任务指令并自动清空。")
+        self.in_sup.setFixedHeight(64)
+
+        self.viewLayout.addWidget(self.titleLabel)
+        for label, w in (("任务名", self.in_name), ("任务指令", self.in_prompt),
+                         ("完成判据", self.in_exit), ("补充情报", self.in_sup)):
+            self.viewLayout.addWidget(CaptionLabel(label))
+            self.viewLayout.addWidget(w)
+        self.yesButton.setText("保存")
+        self.cancelButton.setText("取消")
+
+    def validate(self) -> bool:
+        if not self.in_name.text().strip():
+            InfoBar.warning("提示", "任务名不能为空", parent=self,
+                            position=InfoBarPosition.TOP, duration=2500)
+            return False
+        if not self.in_prompt.toPlainText().strip():
+            InfoBar.warning("提示", "任务指令不能为空", parent=self,
+                            position=InfoBarPosition.TOP, duration=2500)
+            return False
+        return True
+
+    def result_fields(self) -> dict:
+        return {
+            "name": self.in_name.text().strip(),
+            "prompt": self.in_prompt.toPlainText().strip(),
+            "exit_condition": self.in_exit.toPlainText().strip(),
+            "supplement": self.in_sup.toPlainText().strip(),
+        }
+
+
 class TaskPage(QWidget):
     def __init__(self, state: RunState, monitor: MonitorPage, parent=None):
         super().__init__(parent)
@@ -304,6 +368,19 @@ class TaskPage(QWidget):
         self.task_list = ListWidget()
         self._fill_tasks()
         lv.addWidget(self.task_list)
+        self._edit_btns = []
+        ops = QHBoxLayout()
+        ops.setSpacing(6)
+        for icon, label, slot in (
+                (FIF.UP, "上移", self._move_up), (FIF.DOWN, "下移", self._move_down),
+                (FIF.EDIT, "编辑", self._edit_task), (FIF.DELETE, "删除", self._delete_task)):
+            b = PushButton(icon, label)
+            b.clicked.connect(slot)
+            self._edit_btns.append(b)
+            ops.addWidget(b)
+        ops.addStretch(1)
+        ops.addWidget(CaptionLabel("改动直接写回 tasks/daily.yaml（保留注释与排版）"))
+        lv.addLayout(ops)
 
         log_card = CardWidget()
         gv = QVBoxLayout(log_card)
@@ -340,7 +417,8 @@ class TaskPage(QWidget):
 
     def _fill_tasks(self):
         for t in load_tasks():
-            item = QListWidgetItem(f"{t['id']}   {t.get('name', '')}")
+            mark = "  💡补充" if str(t.get("supplement") or "").strip() else ""
+            item = QListWidgetItem(f"{t['id']}   {t.get('name', '')}{mark}")
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Unchecked)
             item.setData(Qt.UserRole, t["id"])
@@ -348,14 +426,97 @@ class TaskPage(QWidget):
             self._items[t["id"]] = item
 
     def refresh_tasks(self):
-        """教学入库后重载任务列表（保留原勾选状态）。"""
+        """教学入库/增删改排后重载任务列表（保留勾选与当前选中行）。"""
         checked = set(self._checked_ids())
+        cur_id = self.task_list.currentItem().data(Qt.UserRole) \
+            if self.task_list.currentItem() else None
         self.task_list.clear()
         self._items.clear()
         self._fill_tasks()
         for tid in checked:
             if tid in self._items:
                 self._items[tid].setCheckState(Qt.Checked)
+        if cur_id in self._items:
+            self.task_list.setCurrentItem(self._items[cur_id])
+
+    # ---- 任务管理（排序/编辑/删除，直接写回 daily.yaml） ----
+
+    def _current_id(self) -> str | None:
+        it = self.task_list.currentItem()
+        return it.data(Qt.UserRole) if it else None
+
+    def _reload_yaml(self):
+        """改动落盘后刷新列表；失败提示（文件未被写坏，taskfile 原子写保证）。"""
+        try:
+            self.refresh_tasks()
+            return True
+        except Exception as e:
+            InfoBar.error("写入失败", f"{e.__class__.__name__}: {e}",
+                          parent=self, position=InfoBarPosition.TOP, duration=-1)
+            return False
+
+    def _move_task(self, delta: int):
+        tid = self._current_id()
+        if tid is None:
+            return
+        order = [it.data(Qt.UserRole) for it in self._items.values()]
+        i = order.index(tid)
+        j = i + delta
+        if not 0 <= j < len(order):
+            return
+        order[i], order[j] = order[j], order[i]
+        try:
+            reorder_tasks(order)
+        except TaskFileError as e:
+            InfoBar.error("写入失败", str(e), parent=self,
+                          position=InfoBarPosition.TOP, duration=-1)
+            return
+        self._reload_yaml()
+
+    def _move_up(self):
+        self._move_task(-1)
+
+    def _move_down(self):
+        self._move_task(1)
+
+    def _edit_task(self):
+        tid = self._current_id()
+        if tid is None:
+            return
+        task = next((t for t in load_tasks() if t["id"] == tid), None)
+        if task is None:
+            self._reload_yaml()
+            return
+        dlg = TaskEditDialog(task, self.window())
+        if dlg.exec():
+            try:
+                update_task(tid, **dlg.result_fields())
+            except TaskFileError as e:
+                InfoBar.error("写入失败", str(e), parent=self,
+                              position=InfoBarPosition.TOP, duration=-1)
+                return
+            self._reload_yaml()
+            InfoBar.success("已保存", f"{tid} 已写回 daily.yaml",
+                            parent=self, position=InfoBarPosition.TOP, duration=3000)
+
+    def _delete_task(self):
+        tid = self._current_id()
+        if tid is None:
+            return
+        box = MessageBox("删除任务", f"确定从任务清单删除「{tid}」？\n"
+                                    f"（剧本与知识卡文件保留，仅摘出清单）",
+                         self.window())
+        if not box.exec():
+            return
+        try:
+            delete_task(tid)
+        except TaskFileError as e:
+            InfoBar.error("写入失败", str(e), parent=self,
+                          position=InfoBarPosition.TOP, duration=-1)
+            return
+        self._reload_yaml()
+        InfoBar.success("已删除", f"{tid} 已移出任务清单",
+                        parent=self, position=InfoBarPosition.TOP, duration=3000)
 
     # ---- 启停 ----
 
@@ -442,6 +603,8 @@ class TaskPage(QWidget):
         self.btn_all.setEnabled(not running)
         self.btn_sel.setEnabled(not running)
         self.btn_stop.setEnabled(running)
+        for b in self._edit_btns:           # 运行中锁定清单编辑（防执行中途改文件竞态）
+            b.setEnabled(not running)
         if not running:
             if self._think_timer.isActive():    # 中途停止：占位行落定，不留悬空"思考中"
                 self._think_timer.stop()
