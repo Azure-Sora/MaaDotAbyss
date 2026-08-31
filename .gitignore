@@ -9,3 +9,8 @@ poc/abyss_map_ui.json
 bin/
 obj/
 bridge/Directory.Build.props
+
+# PyInstaller 本地试打包产物（根目录锚定，避免误伤 bridge/dist）
+/build/
+/dist/
+*.spec

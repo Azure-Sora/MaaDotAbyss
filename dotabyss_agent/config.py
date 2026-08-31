@@ -9,9 +9,14 @@ RUNS_DIR = LOCAL_DIR / "runs"
 
 """全局配置与路径常量。"""
 import os
+import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+if getattr(sys, "frozen", False):
+    # PyInstaller exe：tasks/.local 跟 exe 走（更新覆盖 exe 不丢配置），代码资源在解包目录
+    ROOT = Path(sys.executable).resolve().parent
+else:
+    ROOT = Path(__file__).resolve().parent.parent
 LOCAL_DIR = ROOT / ".local"          # 密钥、运行产物（gitignore）
 TASKS_DIR = ROOT / "tasks"
 KNOWLEDGE_DIR = TASKS_DIR / "knowledge"

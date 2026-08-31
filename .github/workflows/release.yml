@@ -1,0 +1,49 @@
+name: Release
+
+# 给提交打 tag（v*）并推送后触发：构建 GUI exe，连同预构建桥 DLL 一起发 Release。
+# 桥 DLL 无法在 CI 构建——编译依赖本机游戏目录的 BepInEx interop 程序集（游戏文件不可 redistribution），
+# 故入库于 bridge/dist/，更新方式见 bridge/dist/README.md。
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: 安装依赖
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: 打包 GUI exe（PyInstaller）
+        run: >
+          pyinstaller --onefile --windowed --noconfirm --name DotAbyssAgent
+          --collect-all qfluentwidgets --collect-all maa
+          --exclude-module matplotlib
+          run_gui.py
+
+      - name: 组装发布包（exe + 桥 DLL + 任务清单 + 说明）
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force publish | Out-Null
+          Copy-Item dist/DotAbyssAgent.exe publish/
+          Copy-Item bridge/dist/DotAbyssBridge.dll publish/
+          Copy-Item tasks publish/tasks -Recurse
+          Copy-Item packaging/README.txt publish/
+          Compress-Archive -Path publish/* -DestinationPath "DotAbyssAgent-$($env:GITHUB_REF_NAME)-win64.zip"
+
+      - name: 发布到 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: DotAbyssAgent-*-win64.zip
+          generate_release_notes: true
