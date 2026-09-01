@@ -517,84 +517,108 @@ def _resolve_heal(device, led: AbyssLedger, log=print) -> None:
         led.erosion = max(0, led.erosion - 30)
 
 
+def _event_overlay_present(tree) -> bool:
+    """事件覆盖层 Popup_NetherEvent 是否在场（不切场景名；可能连续多轮，31F 实测）。"""
+    for n in _walk_all(tree):
+        b = n.get("button")
+        if b and "Popup_NetherEvent" in b.get("path", ""):
+            return True
+    return False
+
+
 def _resolve_event(device, led: AbyssLedger, brain, log=print) -> None:
-    """事件房：选项效果标签按正则解析（机械化文案），兜底 LLM；pick_event 拍板。"""
+    """事件房：选项效果标签按正则解析（机械化文案），兜底 LLM；pick_event 拍板。
+    事件可能连续多轮（31F 实测：第一轮確定后又弹第二轮营地事件），逐轮处理直到
+    回图或触发内置战斗。"""
     from .abyss_plan import pick_event
-    tree = device.ui_tree(max_nodes=30000)
-    # 选项卡 = TitleText（标题）+ 同级 Text（效果标签），同 x 邻域归组
-    titles = [n for n in _walk_all(tree) if n["name"] == "TitleText" and n.get("text")]
-    texts = [n for n in _walk_all(tree) if n["name"] == "Text" and n.get("text")]
-    options = []
-    for t in titles:
-        if t["name"] != "TitleText" or not t.get("screen"):
-            continue
-        s0, s1 = t["screen"][0], t["screen"][2]   # 标题框即卡宽（防跨卡串文）
-        desc = ""
-        for x in texts:
-            if not x.get("screen"):
+
+    def one_round(tree) -> None:
+        # 选项卡 = TitleText（标题）+ 同级 Text（效果标签），同 x 邻域归组
+        titles = [n for n in _walk_all(tree) if n["name"] == "TitleText" and n.get("text")]
+        texts = [n for n in _walk_all(tree) if n["name"] == "Text" and n.get("text")]
+        options = []
+        for t in titles:
+            if t["name"] != "TitleText" or not t.get("screen"):
                 continue
-            xx = (x["screen"][0] + x["screen"][2]) / 2
-            if s0 - 20 <= xx <= s1 + 20 and x["screen"][1] >= t["screen"][1]:
-                desc += x["text"]
-        if desc:
-            options.append({"title": t["text"], "desc": desc, "screen": t["screen"]})
-    if not options:
-        raise RuntimeError("事件房未找到选项卡")
+            s0, s1 = t["screen"][0], t["screen"][2]   # 标题框即卡宽（防跨卡串文）
+            desc = ""
+            for x in texts:
+                if not x.get("screen"):
+                    continue
+                xx = (x["screen"][0] + x["screen"][2]) / 2
+                if s0 - 20 <= xx <= s1 + 20 and x["screen"][1] >= t["screen"][1]:
+                    desc += x["text"]
+            if desc:
+                options.append({"title": t["text"], "desc": desc, "screen": t["screen"]})
+        if not options:
+            raise RuntimeError("事件房未找到选项卡")
 
-    def parse(o):
-        d = o["desc"]
-        locked = "選択できません" in d or "選択できません" in o["title"]
-        m = re.search(r"浸食率\s*(\d+)\s*上昇", d)
-        ec = int(m.group(1)) if m else 0
-        m = re.search(r"浸食率\s*(\d+)\s*減少|浸食率\s*減少\s*(\d+)", d)
-        eg = int(m.group(1) or m.group(2) or 0) if m else 0
-        m = re.search(r"HP.*?(\d+)%\s*減少", d)
-        hp = int(m.group(1)) if m else 0
-        m = re.search(r"(\d+)\s*個消費", d)
-        coin = int(m.group(1)) if m else 0
-        return {"hp_cost": hp, "erosion_cost": ec, "erosion_gain": eg,
-                "coin_cost": coin, "locked": locked,
-                "code_gain": "コード" in d and "獲得" in d,
-                "item_gain": "アイテム" in d and "選択" in d}
+        def parse(o):
+            d = o["desc"]
+            # 锁定有两种文案：選択できません / 〜条件を満たしていない（31F 实测）
+            locked = ("選択できません" in d or "選択できません" in o["title"]
+                      or "条件を満たしていない" in d or "条件を満たしていない" in o["title"])
+            m = re.search(r"浸食率\s*(\d+)\s*上昇", d)
+            ec = int(m.group(1)) if m else 0
+            m = re.search(r"浸食率\s*(\d+)\s*減少|浸食率\s*減少\s*(\d+)", d)
+            eg = int(m.group(1) or m.group(2) or 0) if m else 0
+            m = re.search(r"HP.*?(\d+)%\s*減少", d)
+            hp = int(m.group(1)) if m else 0
+            m = re.search(r"(\d+)\s*個消費", d)
+            coin = int(m.group(1)) if m else 0
+            return {"hp_cost": hp, "erosion_cost": ec, "erosion_gain": eg,
+                    "coin_cost": coin, "locked": locked,
+                    "code_gain": "コード" in d and "獲得" in d,
+                    "item_gain": "アイテム" in d and "選択" in d}
 
-    parsed = [parse(o) for o in options]
-    open_opts = [(i, p) for i, p in enumerate(parsed) if not p["locked"]]
-    if not open_opts:      # 全部锁定：选代价最小的凑合过（事件强制选择）
-        i = min(range(len(options)),
-                key=lambda k: (parsed[k]["hp_cost"], parsed[k]["erosion_cost"]))
-    else:
-        i = max((k for k, p in enumerate(parsed) if not p["locked"]),
-                key=lambda k: event_score(parsed[k], led))
-    o = options[i]
-    log(f"  事件『{o['title']}』效果={o['desc'][:40]!r}"
-        + ("（锁定，备选）" if parsed[i]["locked"] else ""))
-    if not _click_text_center(device, tree, o["title"], log=log):
-        raise RuntimeError("事件选项点击失败")
-    time.sleep(0.6)
-    tree2 = device.ui_tree(max_nodes=30000)
-    if not _click_text_center(device, tree2, "確定", log=log):
-        device.click_ui(639, 651)
-        log("  点击 確定(兜底坐标)")
-    p = parse(o)
-    led.hp_lost_pct += p["hp_cost"]
-    led.erosion = max(0, led.erosion - p["erosion_gain"] + p["erosion_cost"])
-    led.coins = max(0, led.coins - p["coin_cost"])
-    # 事件可能触发内置特殊战斗（野兽类，实测 2026-08-30）：等它打完并走完整结算流
-    # （QUEST CLEAR→代码弹窗/報酬→回图）。纯文本事件会直接回 Nether。此前只靠
-    # _wait_map_stable 兜底点左上角，QUEST CLEAR 推不走会卡死（2026-09-01 实战）。
-    # 确定后转场启动有延迟窗口，场景短暂仍是 Nether——前 ~10s 不下"无战斗"结论。
-    saw_other = False
-    for i in range(100):
-        sc = _scene(device)
-        if sc == "ExplorarionNetherResult":
-            resolve_battle(device, led, brain, log=log)   # 已在 Result → 直接进结算流
+        parsed = [parse(o) for o in options]
+        open_opts = [(i, p) for i, p in enumerate(parsed) if not p["locked"]]
+        if not open_opts:      # 全部锁定：选代价最小的凑合过（事件强制选择）
+            i = min(range(len(options)),
+                    key=lambda k: (parsed[k]["hp_cost"], parsed[k]["erosion_cost"]))
+        else:
+            i = max((k for k, p in enumerate(parsed) if not p["locked"]),
+                    key=lambda k: event_score(parsed[k], led))
+        o = options[i]
+        log(f"  事件『{o['title']}』效果={o['desc'][:40]!r}"
+            + ("（锁定，备选）" if parsed[i]["locked"] else ""))
+        if not _click_text_center(device, tree, o["title"], log=log):
+            raise RuntimeError("事件选项点击失败")
+        time.sleep(0.6)
+        tree2 = device.ui_tree(max_nodes=30000)
+        if not _click_text_center(device, tree2, "確定", log=log):
+            device.click_ui(639, 651)
+            log("  点击 確定(兜底坐标)")
+        p = parse(o)
+        led.hp_lost_pct += p["hp_cost"]
+        led.erosion = max(0, led.erosion - p["erosion_gain"] + p["erosion_cost"])
+        led.coins = max(0, led.coins - p["coin_cost"])
+        # 事件可能触发内置特殊战斗（野兽类，实测 2026-08-30）：等它打完并走完整结算流
+        # （QUEST CLEAR→代码弹窗/報酬→回图）；也可能直接弹下一轮事件（31F 实测）或干净
+        # 回图。确定后转场启动有延迟窗，场景短暂仍是 Nether——前 ~10s 不下"无战斗"结论。
+        saw_other = False
+        for i in range(100):
+            time.sleep(3.0)
+            sc = _scene(device)
+            if sc == "ExplorarionNetherResult":
+                resolve_battle(device, led, brain, log=log)   # 已在 Result → 直接进结算流
+                return
+            if sc != "Nether":
+                saw_other = True    # 战斗/转场进行中
+                continue
+            tree = device.ui_tree(max_nodes=30000)
+            if _event_overlay_present(tree):
+                break               # 下一轮事件，回外层继续
+            if saw_other or i > 3:
+                return              # 打完回图；或无战斗直接回图
+        else:
+            raise RuntimeError("事件房确定后 5 分钟未出结算也未回图——需人工")
+
+    for _round in range(6):
+        tree = device.ui_tree(max_nodes=30000)
+        if not _event_overlay_present(tree):
             return
-        if sc != "Nether":
-            saw_other = True    # 战斗/转场进行中
-        elif saw_other or i > 3:
-            return              # 打完回图；或始终 Nether（纯文本事件）
-        time.sleep(3.0)
-    raise RuntimeError("事件房确定后 5 分钟未出结算也未回图——需人工")
+        one_round(tree)
 
 
 def _close_shop(device, log=print) -> None:
@@ -933,11 +957,14 @@ def run_to_floor(device, led: AbyssLedger, brain=None, log=print,
                 cands = []
             if cands:
                 break
-            # 空读兜底：遗留弹窗（战斗房稀有代码弹窗/结算浮层）会挡住候选读取
+            # 空读兜底：遗留弹窗（代码弹窗/结算浮层/事件覆盖层）会挡住候选读取
             tree = device.ui_tree(max_nodes=30000)
             if _code_popup_present(tree) or _overlay_present(tree):
                 log("  [兜底] 地图被遗留弹窗遮挡，排空后重读")
                 _result_step(device, led, brain, log=log, tree=tree)
+            elif _event_overlay_present(tree):
+                log("  [兜底] 事件覆盖层遗留，重新处理")
+                _resolve_event(device, led, brain, log=log)
             time.sleep(3.0)
         if not cands:
             return {"status": "no_candidates", "floor": led.floor, "rooms": rooms}
