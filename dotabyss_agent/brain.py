@@ -264,6 +264,17 @@ class Brain:
         )
         return self._parse_json(text)
 
+    def ask_json(self, instruction: str, text: str) -> dict:
+        """纯文本→JSON 问答（程序化逻辑失败时的 LLM 兜底决策用）。
+
+        instruction 定角色与输出约束，text 是现场描述；要求两者都让模型只输出 JSON。
+        """
+        resp = self._chat(
+            [{"type": "text", "text": text}],
+            system=instruction,
+        )
+        return self._parse_json(resp)
+
     def select_flow_steps(self, record_lines: list[str]) -> dict:
         """从探索执行记录中挑选『最短正确路径』的关键点击步骤，并判断探索是否退化。
 
