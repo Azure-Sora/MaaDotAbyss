@@ -533,6 +533,13 @@ def _resolve_event(device, led: AbyssLedger, brain, log=print) -> None:
     from .abyss_plan import pick_event
 
     def one_round(tree) -> None:
+        def _event_btn(name):
+            for n in _walk_all(device.ui_tree(max_nodes=30000)):
+                b = n.get("button")
+                if b and n["name"] == name and "NetherEvent" in b.get("path", ""):
+                    return b
+            return None
+
         # 选项卡 = TitleText（标题）+ 同级 Text（效果标签），同 x 邻域归组
         titles = [n for n in _walk_all(tree) if n["name"] == "TitleText" and n.get("text")]
         texts = [n for n in _walk_all(tree) if n["name"] == "Text" and n.get("text")]
@@ -572,23 +579,42 @@ def _resolve_event(device, led: AbyssLedger, brain, log=print) -> None:
                     "item_gain": "アイテム" in d and "選択" in d}
 
         parsed = [parse(o) for o in options]
-        open_opts = [(i, p) for i, p in enumerate(parsed) if not p["locked"]]
-        if not open_opts:      # 全部锁定：选代价最小的凑合过（事件强制选择）
-            i = min(range(len(options)),
-                    key=lambda k: (parsed[k]["hp_cost"], parsed[k]["erosion_cost"]))
-        else:
-            i = max((k for k, p in enumerate(parsed) if not p["locked"]),
-                    key=lambda k: event_score(parsed[k], led))
+        if not any(not q["locked"] for q in parsed):
+            # 全锁定：点击无法確定、X 跳过是唯一出路（42F 死循环实测；8-29「X 不可
+            # 跳过」结论已过时）。锁定文案若遇变种漏判，下方確定检查仍会兜住。
+            log("  事件选项全部锁定——X 跳过该事件")
+            cl = _event_btn("Button_Close")
+            if cl and cl.get("interactable"):
+                device.click_by_path(cl["path"])
+                log("  事件 X 跳过")
+            elif not _skip_overlay_by_corner(device, log=log):
+                raise RuntimeError("事件全锁定且 X/左上角均无法跳过——需人工")
+            return
+        i = max((k for k, p in enumerate(parsed) if not p["locked"]),
+                key=lambda k: event_score(parsed[k], led))
         o = options[i]
         log(f"  事件『{o['title']}』效果={o['desc'][:40]!r}"
             + ("（锁定，备选）" if parsed[i]["locked"] else ""))
         if not _click_text_center(device, tree, o["title"], log=log):
             raise RuntimeError("事件选项点击失败")
         time.sleep(0.6)
-        tree2 = device.ui_tree(max_nodes=30000)
-        if not _click_text_center(device, tree2, "確定", log=log):
-            device.click_ui(639, 651)
-            log("  点击 確定(兜底坐标)")
+
+
+        cf = _event_btn("Button_Confirm")
+        if cf and cf.get("interactable"):
+            device.click_by_path(cf["path"])
+            log("  点击 確定")
+        else:
+            # 锁定选项点击无反应、確定不亮（42F 实测：三选项全锁时死循环）——
+            # X 跳过是唯一出路（8-29「X 不可跳过」结论已过时，多轮事件版 X 实测有效）
+            log("  確定不可用（选项锁定）——X 跳过该事件")
+            cl = _event_btn("Button_Close")
+            if cl and cl.get("interactable"):
+                device.click_by_path(cl["path"])
+                log("  事件 X 跳过")
+            elif not _skip_overlay_by_corner(device, log=log):
+                raise RuntimeError("事件全锁定且 X/左上角均无法跳过——需人工")
+            return
         p = parse(o)
         led.hp_lost_pct += p["hp_cost"]
         led.erosion = max(0, led.erosion - p["erosion_gain"] + p["erosion_cost"])
