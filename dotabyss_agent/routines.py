@@ -8,17 +8,61 @@ partial = 中途卡住/可疑，剩余情况已写入 detail，由 LLM 兜底决
 """
 import re
 import time
+from dataclasses import dataclass, field
 
 from .daily_routines import claim_idle_reward
+from .execution import ExecutionResult, ExecutionStatus, Routine
 from .macros import (
-    battle_and_return, click_path, collect_buttons, collect_texts, find_btn,
-    popup_cancel_consume, scene, walk,
+    TransitionTimeout, battle_and_return, click_path, collect_buttons,
+    collect_texts, find_btn, popup_cancel_consume, scene, walk,
 )
 from .sweep_dsl import generic_sweep, load_saved_routines, save_program
 
 COUNTRIES = ("Milesgard", "Peldion", "Eldorana", "Coalition", "Luxnova")
 
 SUSPECT_LIMIT = 2   # 连续 N 场"计数未递减"视为异常，交还 LLM
+
+
+def _routine_result(status: ExecutionStatus, cleared: int, detail: str) -> dict:
+    return {
+        "status": status.value,
+        "cleared": int(cleared),
+        "detail": str(detail),
+    }
+
+
+@dataclass(slots=True)
+class SweepSession:
+    """三类连打共享的生命周期状态，不包含具体页面知识。"""
+
+    timeout: float
+    started: float = field(default_factory=time.time)
+    cleared: int = 0
+    suspect: int = 0
+
+    def checkpoint(self, stop_event=None) -> dict | None:
+        if _check_stop(stop_event):
+            return self.partial("用户停止")
+        if time.time() - self.started >= self.timeout:
+            return self.partial("总超时")
+        return None
+
+    def done(self, detail: str) -> dict:
+        return _routine_result(ExecutionStatus.DONE, self.cleared, detail)
+
+    def partial(self, detail: str) -> dict:
+        return _routine_result(ExecutionStatus.PARTIAL, self.cleared, detail)
+
+    def mark_success(self) -> None:
+        self.cleared += 1
+        self.suspect = 0
+
+    def mark_cleared(self) -> None:
+        self.cleared += 1
+
+    def mark_suspect(self, detail: str) -> dict | None:
+        self.suspect += 1
+        return self.partial(detail) if self.suspect >= SUSPECT_LIMIT else None
 
 
 # ---- 通用小件 -----------------------------------------------------------
@@ -114,33 +158,31 @@ def forces_sweep(device, log=print, stop_event=None, frame_cb=None,
                  timeout: float = 1200.0) -> dict:
     home = "UnionRequest"
     if not _at_home(device, home):
-        return {"status": "wrong_scene", "cleared": 0,
-                "detail": f"不在 {home}（势力任务列表），请先导航"}
-    t0 = time.time()
-    cleared, suspect = 0, 0
-    while time.time() - t0 < timeout:
-        if _check_stop(stop_event):
-            return {"status": "partial", "cleared": cleared, "detail": "用户停止"}
+        return _routine_result(
+            ExecutionStatus.WRONG_SCENE, 0, f"不在 {home}（势力任务列表），请先导航"
+        )
+    session = SweepSession(timeout)
+    while True:
+        halted = session.checkpoint(stop_event)
+        if halted:
+            return halted
         cards = [c for c in _forces_cards(device)
                  if c["open"] and c["btn"] and c["remaining"] > 0]
         if not cards:
             left = [(c["country"], c["remaining"]) for c in _forces_cards(device) if c["open"]]
-            return {"status": "done", "cleared": cleared,
-                    "detail": "开放关卡全部打完 " + (str(left) if left else "")}
+            return session.done("开放关卡全部打完 " + (str(left) if left else ""))
         card = cards[0]
         log(f"[forces] {card['country']} {card['title']} 剩余 {card['remaining']}")
         if not click_path(device, card["btn"]):
-            return {"status": "partial", "cleared": cleared,
-                    "detail": f"点 {card['country']} 挑戦失败"}
+            return session.partial(f"点 {card['country']} 挑戦失败")
         p = _popup_btn_wait(
             device, "Popup_UnionRequestDetail(Clone)/Box/Contents/Popup_ButtonSet2/Button_Confirm")
         if not p:
             # 弹窗没开（回数可能在列表页显示延迟）→ 回读状态重判
-            suspect += 1
-            log(f"[forces] 详情弹窗未出现（suspect {suspect}）")
-            if suspect >= SUSPECT_LIMIT:
-                return {"status": "partial", "cleared": cleared,
-                        "detail": "挑戦弹窗连续未出现"}
+            failed = session.mark_suspect("挑戦弹窗连续未出现")
+            log(f"[forces] 详情弹窗未出现（suspect {session.suspect}）")
+            if failed:
+                return failed
             time.sleep(2.0)
             continue
         # 周回(Button_SkipMode)禁用——拿不全奖励，只走出撃单刷
@@ -150,28 +192,27 @@ def forces_sweep(device, log=print, stop_event=None, frame_cb=None,
         if sortie:
             click_path(device, sortie)
         if not battle_and_return(device, home, log=log, timeout=240, frame_cb=frame_cb):
-            return {"status": "partial", "cleared": cleared,
-                    "detail": f"{card['country']} 战斗/结算超时未回列表"}
-        cleared += 1
+            return session.partial(f"{card['country']} 战斗/结算超时未回列表")
+        session.mark_cleared()
         after = next((c for c in _forces_cards(device) if c["country"] == card["country"]), None)
         if after and after["remaining"] < card["remaining"]:
-            suspect = 0
+            session.suspect = 0
             log(f"[forces] ✓ {card['country']} 剩余 {card['remaining']}→{after['remaining']}")
         else:
             # 结算后卡片数据可能有服务器刷新延迟，等一下重读再定责
             time.sleep(2.0)
             after = next((c for c in _forces_cards(device) if c["country"] == card["country"]), None)
             if after and after["remaining"] < card["remaining"]:
-                suspect = 0
+                session.suspect = 0
                 log(f"[forces] ✓ {card['country']} 剩余 {card['remaining']}→{after['remaining']}（延迟刷新）")
                 continue
-            suspect += 1
-            log(f"[forces] ? {card['country']} 计数未递减（suspect {suspect}）"
+            failed = session.mark_suspect(
+                f"{card['country']} 连续计数未递减，请 LLM 检查"
+            )
+            log(f"[forces] ? {card['country']} 计数未递减（suspect {session.suspect}）"
                 "——可能败北或界面延迟")
-            if suspect >= SUSPECT_LIMIT:
-                return {"status": "partial", "cleared": cleared,
-                        "detail": f"{card['country']} 连续计数未递减，请 LLM 检查"}
-    return {"status": "partial", "cleared": cleared, "detail": "总超时"}
+            if failed:
+                return failed
 
 
 # ---- 迎击战 ---------------------------------------------------------------
@@ -202,29 +243,30 @@ def disaster_sweep(device, log=print, stop_event=None, frame_cb=None,
                    timeout: float = 900.0) -> dict:
     home = "DisasterTop"
     if not _at_home(device, home):
-        return {"status": "wrong_scene", "cleared": 0,
-                "detail": f"不在 {home}（迎击战页），请先导航"}
-    t0 = time.time()
-    cleared, suspect = 0, 0
-    while time.time() - t0 < timeout:
-        if _check_stop(stop_event):
-            return {"status": "partial", "cleared": cleared, "detail": "用户停止"}
+        return _routine_result(
+            ExecutionStatus.WRONG_SCENE, 0, f"不在 {home}（迎击战页），请先导航"
+        )
+    session = SweepSession(timeout)
+    while True:
+        halted = session.checkpoint(stop_event)
+        if halted:
+            return halted
         bosses = [b for b in _disaster_bosses(device) if not b["done"] and "/Sp" not in b["btn"]]
         if not bosses:
-            return {"status": "done", "cleared": cleared,
-                    "detail": "三个小 boss 全部击退"}
+            return session.done("三个小 boss 全部击退")
         boss = bosses[0]
         log(f"[disaster] 出击 {boss['btn'].split('/Area')[-1].split('/')[0]}（{boss['label'][:30]}）")
         if not click_path(device, boss["btn"]):
-            return {"status": "partial", "cleared": cleared, "detail": "点 boss 失败"}
+            return session.partial("点 boss 失败")
         p = _popup_btn_wait(
             # 2026-08-31 游戏更新：详情弹窗按钮组 ButtonSet2→ButtonSet3（キャンセル/スキップ/出撃）
             device, "Popup_QuestDetail_Disaster(Clone)/Box/Contents/Popup_ButtonSet3/Button_Confirm")
         if not p:
-            suspect += 1
-            if suspect >= SUSPECT_LIMIT:
-                return {"status": "partial", "cleared": cleared,
-                        "detail": "boss 详情弹窗连续未出现（可能已讨伐状态判断失效）"}
+            failed = session.mark_suspect(
+                "boss 详情弹窗连续未出现（可能已讨伐状态判断失效）"
+            )
+            if failed:
+                return failed
             time.sleep(2.0)
             continue
         click_path(device, p)   # 出撃
@@ -233,9 +275,8 @@ def disaster_sweep(device, log=print, stop_event=None, frame_cb=None,
         if p2:
             click_path(device, p2)  # 決定（「…に出撃します」）
         if not battle_and_return(device, home, log=log, timeout=240, frame_cb=frame_cb):
-            return {"status": "partial", "cleared": cleared,
-                    "detail": "战斗/结算超时未回迎击战页"}
-        cleared += 1
+            return session.partial("战斗/结算超时未回迎击战页")
+        session.mark_cleared()
         after = _disaster_bosses(device)
         this = next((b for b in after if b["btn"] == boss["btn"]), None)
         if not (this and this["done"]):
@@ -243,15 +284,15 @@ def disaster_sweep(device, log=print, stop_event=None, frame_cb=None,
             after = _disaster_bosses(device)
             this = next((b for b in after if b["btn"] == boss["btn"]), None)
         if this and this["done"]:
-            suspect = 0
-            log(f"[disaster] ✓ boss 击退（{cleared}/3）")
+            session.suspect = 0
+            log(f"[disaster] ✓ boss 击退（{session.cleared}/3）")
         else:
-            suspect += 1
-            log(f"[disaster] ? boss 状态未变（suspect {suspect}）——可能败北")
-            if suspect >= SUSPECT_LIMIT:
-                return {"status": "partial", "cleared": cleared,
-                        "detail": "boss 连续未判定为已讨伐（可能打不过），交还 LLM"}
-    return {"status": "partial", "cleared": cleared, "detail": "总超时"}
+            failed = session.mark_suspect(
+                "boss 连续未判定为已讨伐（可能打不过），交还 LLM"
+            )
+            log(f"[disaster] ? boss 状态未变（suspect {session.suspect}）——可能败北")
+            if failed:
+                return failed
 
 
 # ---- 探索任务 --------------------------------------------------------------
@@ -295,14 +336,15 @@ def expedition_sweep(device, log=print, stop_event=None, frame_cb=None,
                      timeout: float = 1500.0) -> dict:
     home = "IdleExploration"
     if not _at_home(device, home):
-        return {"status": "wrong_scene", "cleared": 0,
-                "detail": f"不在 {home}（探索队页），请先导航"}
-    t0 = time.time()
-    cleared, suspect = 0, 0
+        return _routine_result(
+            ExecutionStatus.WRONG_SCENE, 0, f"不在 {home}（探索队页），请先导航"
+        )
+    session = SweepSession(timeout)
     opened = False
-    while time.time() - t0 < timeout:
-        if _check_stop(stop_event):
-            return {"status": "partial", "cleared": cleared, "detail": "用户停止"}
+    while True:
+        halted = session.checkpoint(stop_event)
+        if halted:
+            return halted
         if not opened:
             if _expedition_quests(device):
                 opened = True   # 任务列表已开着（上轮遗留/LLM 先开了），直接读
@@ -310,33 +352,31 @@ def expedition_sweep(device, log=print, stop_event=None, frame_cb=None,
             entry = next((b["path"] for b in collect_buttons(device.ui_tree(max_nodes=30000))
                           if b["path"].endswith("Top/Right/Button_EncountQuest")), None)
             if not entry:
-                return {"status": "partial", "cleared": cleared,
-                        "detail": "找不到探索クエスト入口"}
+                return session.partial("找不到探索クエスト入口")
             click_path(device, entry)
             time.sleep(1.5)
             opened = True
         quests = _expedition_quests(device)
         if not quests:
-            return {"status": "done", "cleared": cleared,
-                    "detail": "没有进行中的探索任务"}
+            return session.done("没有进行中的探索任务")
         # 所有任务共享同一免费次数池（2026-08-30 用户确认：打完的任务会消失，
         # 下一个顶上，各卡显示的挑戦回数一致）——打第一个可用条目即可
         quest = quests[0]
         if quest["remaining"] == 0:
-            return {"status": "done", "cleared": cleared,
-                    "detail": "免费次数已用完"}
+            return session.done("免费次数已用完")
         if quest["remaining"] < 0:
             log("[expedition] 回数读取失败，按可打处理")
         log(f"[expedition] {quest['title'][:36]}… 剩余 {quest['remaining']}")
         try:
             d = device.click_ui(quest["cx"], quest["cy"])   # 開始（坐标区分同名条目）
-        except Exception:
-            d = ""
+        except Exception as exc:
+            return session.partial(
+                f"点「開始」异常: {exc.__class__.__name__}: {exc}"
+            )
         if not d:
-            suspect += 1
-            if suspect >= SUSPECT_LIMIT:
-                return {"status": "partial", "cleared": cleared,
-                        "detail": "点「開始」未命中"}
+            failed = session.mark_suspect("点「開始」未命中")
+            if failed:
+                return failed
             opened = False
             time.sleep(2.0)
             continue
@@ -346,34 +386,22 @@ def expedition_sweep(device, log=print, stop_event=None, frame_cb=None,
         if cancel:
             click_path(device, cancel)
             log("[expedition] 免费次数已尽（恢复确认已拒绝）→ 完成")
-            return {"status": "done", "cleared": cleared,
-                    "detail": "免费次数用完（消费弹窗已拒绝）"}
+            return session.done("免费次数用完（消费弹窗已拒绝）")
         p = _popup_btn_wait(
             device, "Popup_QuestDetail_Exploration(Clone)/Box/Contents/Popup_ButtonSet3/Button_Confirm")
         if not p:
-            suspect += 1
-            if suspect >= SUSPECT_LIMIT:
-                return {"status": "partial", "cleared": cleared,
-                        "detail": "任务详情弹窗连续未出现"}
+            failed = session.mark_suspect("任务详情弹窗连续未出现")
+            if failed:
+                return failed
             opened = False
             time.sleep(2.0)
             continue
         click_path(device, p)   # 出撃（无二段确认，直接进战斗）
         if not battle_and_return(device, home, log=log, timeout=240, frame_cb=frame_cb):
-            return {"status": "partial", "cleared": cleared,
-                    "detail": "战斗/结算超时未回探索队页"}
-        cleared += 1
+            return session.partial("战斗/结算超时未回探索队页")
+        session.mark_success()
         opened = False   # 结算后列表弹层自动关闭，重开再读回数
         time.sleep(1.5)
-    return {"status": "partial", "cleared": cleared, "detail": "总超时"}
-
-
-ROUTINES = {
-    "claim_idle_reward": claim_idle_reward,
-    "forces_sweep": forces_sweep,
-    "disaster_sweep": disaster_sweep,
-    "expedition_sweep": expedition_sweep,
-}
 
 
 # ---- 注册表（统一签名 + LLM 编排的已存 routine） ---------------------------
@@ -383,25 +411,57 @@ ROUTINES = {
 # tasks/routines/*.json 里的已存编排吃 params（已存的可在调用时覆盖个别字段）。
 
 
-def _adap(fn):
+def _adapt(fn) -> Routine:
     def wrapper(device, params=None, *, log=print, stop_event=None, frame_cb=None, **_):
         return fn(device, log=log, stop_event=stop_event, frame_cb=frame_cb)
     wrapper.__name__ = fn.__name__
     return wrapper
 
 
-ROUTINES = {
-    "claim_idle_reward": _adap(claim_idle_reward),
-    "forces_sweep": _adap(forces_sweep),
-    "disaster_sweep": _adap(disaster_sweep),
-    "expedition_sweep": _adap(expedition_sweep),
+_BUILTIN_ROUTINES: dict[str, Routine] = {
+    "claim_idle_reward": _adapt(claim_idle_reward),
+    "forces_sweep": _adapt(forces_sweep),
+    "disaster_sweep": _adapt(disaster_sweep),
+    "expedition_sweep": _adapt(expedition_sweep),
     "generic_sweep": generic_sweep,
 }
+ROUTINES: dict[str, Routine] = dict(_BUILTIN_ROUTINES)
 
 
 def reload_saved() -> None:
     """把 tasks/routines/*.json 的已存编排并入注册表（新存盘后调用）。"""
-    ROUTINES.update(load_saved_routines())
+    saved = load_saved_routines()
+    ROUTINES.clear()
+    ROUTINES.update(_BUILTIN_ROUTINES)
+    ROUTINES.update(saved)
+
+
+def available_routines() -> tuple[str, ...]:
+    return tuple(sorted(ROUTINES))
+
+
+def run_routine(name: str, device, params: dict | None = None, *, log=print,
+                stop_event=None, frame_cb=None) -> ExecutionResult:
+    """统一 routine 查找、调用与异常语义。"""
+    fn = ROUTINES.get(str(name))
+    if fn is None:
+        return ExecutionResult(
+            ExecutionStatus.PARTIAL,
+            detail=f"未知 routine: {name}（可用: {', '.join(available_routines())}）",
+        )
+    try:
+        raw = fn(device, params or {}, log=log, stop_event=stop_event,
+                 frame_cb=frame_cb)
+    except TransitionTimeout as exc:
+        return ExecutionResult(ExecutionStatus.BLOCKED, detail=str(exc))
+    except Exception as exc:
+        return ExecutionResult(
+            ExecutionStatus.PARTIAL,
+            detail=f"{exc.__class__.__name__}: {exc}",
+        )
+    if isinstance(raw, ExecutionResult):
+        return raw
+    return ExecutionResult.from_mapping(raw)
 
 
 def save_and_register(name: str, params: dict) -> str:

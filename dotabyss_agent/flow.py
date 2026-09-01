@@ -24,6 +24,7 @@ import numpy as np
 import yaml
 
 from .config import TASKS_DIR
+from .execution import safe_callback
 
 FLOWS_DIR = TASKS_DIR / "flows"
 
@@ -94,12 +95,8 @@ class FlowRunner:
 
     # ---- 单步 -----------------------------------------------------------
 
-    def _emit(self, frame_cb, frame):
-        if frame_cb is not None:
-            try:
-                frame_cb(frame)
-            except Exception:
-                pass
+    def _emit(self, frame_cb, frame, log=print):
+        safe_callback(frame_cb, frame, log=log, label=f"flow {self.flow_id} frame")
 
     def _run_step(self, step: dict, log, frame_cb):
         if "loop_click" in step:
@@ -111,7 +108,7 @@ class FlowRunner:
         if "context" in step:
             ctx = step["context"]
             frame = self.device.screenshot()
-            self._emit(frame_cb, frame)
+            self._emit(frame_cb, frame, log)
             if not anchor_visible(frame, self._anchor(ctx["anchor"]), float(ctx.get("threshold", 0.85))):
                 raise FlowError(f"上下文锚点缺失: {ctx['anchor']}（不在预期页面上）")
 
@@ -133,7 +130,7 @@ class FlowRunner:
             elif "find" in step:
                 find = step["find"]
                 frame = self.device.screenshot()
-                self._emit(frame_cb, frame)
+                self._emit(frame_cb, frame, log)
                 pos = match_anchor(frame, self._anchor(find["anchor"]), float(find.get("threshold", 0.85)))
                 if pos is None:
                     mode = step.get("no_match", "fail")
@@ -163,7 +160,7 @@ class FlowRunner:
                 pre_frame if pre_frame is not None else self.device.screenshot(),
                 max_wait=float(step.get("max_wait", 8)),
             )
-            self._emit(frame_cb, frame)
+            self._emit(frame_cb, frame, log)
 
             expect = step.get("expect")
             if not expect:
@@ -190,7 +187,7 @@ class FlowRunner:
         max_times = int(cfg.get("max_times", 8))
         for i in range(1, max_times + 1):
             frame = self.device.screenshot()
-            self._emit(frame_cb, frame)
+            self._emit(frame_cb, frame, log)
             if until and anchor_visible(frame, self._anchor(until["anchor"]), float(until.get("threshold", 0.85))):
                 log(f"  循环结束（退出锚点出现，共点击 {i - 1} 次）")
                 return
