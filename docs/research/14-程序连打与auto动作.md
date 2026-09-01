@@ -86,9 +86,10 @@ run_task(LLM 循环)
    全屏无响应（两次实测，用户手动重启游戏）。可靠信号：`Transition` canvas 的
    eff-active 节点数平时=2（Transition+TransitionService），转场时整组激活（~20，
    持续 1-2s）。**场景名在转场中段就切换、画面 diff 也可能很小**——wait_settled
-   有盲区，不能靠它们。对策：`wait_transition_done()`（先睡 0.5s 给转场启动时间
-   再轮询——点击到转场层激活有延迟窗口）接入所有点击后路径；LLM click/skip 分支
-   转场未结束即熔断 blocked。
+   有盲区，不能靠它们。最初“先睡 0.5s 再轮询”的实现仍有晚启动漏检；现改为
+   所有程序路径点击前取短空闲窗、点击后覆盖 1.5s 启动宽限期，并在看到 busy 后
+   要求连续空闲才放行。超时抛 `TransitionTimeout`，任务直接 `blocked`，不再交给
+   LLM 多点一次。
 2. **ui_tree max_nodes 截断**：canvas 遍历顺序不可控（FindObjectsOfType 无序），
    max_nodes=8000 时排后面的 UICanvas/Front 画布可能被整体截掉——disaster 结算页
    「次へ」找不到死循环 300s、expedition 入口找不到，同根因。对策：全树读取一律

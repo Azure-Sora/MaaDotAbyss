@@ -63,7 +63,10 @@ class FlowRunner:
 
     def _anchor(self, name: str) -> np.ndarray:
         if name not in self._cache:
-            img = cv2.imread(str(self.anchor_dir / name), cv2.IMREAD_COLOR)
+            # common/ 前缀供 flow 复用主页/返回等稳定上下文锚点，避免每个教学任务
+            # 各复制一份相同素材。
+            path = FLOWS_DIR / "anchors" / name if name.startswith("common/") else self.anchor_dir / name
+            img = cv2.imread(str(path), cv2.IMREAD_COLOR)
             if img is None:
                 raise FlowError(f"锚点图不存在: {name}")
             self._cache[name] = img

@@ -6,6 +6,7 @@
 - skip_page 仅用于无按钮结算页（点 (0,0) 全屏接管层，与深渊 _result_step 同款）
 - 消费红线：消費/回復/購入句式的确认弹窗一律点キャンセル
 """
+import math
 import re
 import time
 
@@ -14,6 +15,10 @@ RESULT_SCENES = {"ExploreResult", "DisasterResult"}
 
 # 结算路上绝不主动点的按钮名（铁律：绝不碰撤退/返回主页之外的可疑项）
 FORBIDDEN_BTN = ("PullOut", "Retreat")
+
+
+class TransitionTimeout(RuntimeError):
+    """点击后的 Unity Transition 层未在时限内恢复空闲。"""
 
 
 def observe_buttons(device, canvas=None, suffix="", contains="", text="",
@@ -120,11 +125,25 @@ def find_btn(buttons, name_suffix=None, text=None):
 
 
 def click_path(device, path) -> bool:
+    """安全点击 UI 路径，并把点击后的 Transition 完整周期当作 barrier。
+
+    旧实现只负责发 click，调用方经常在转场层延迟激活前就开始找/点下一颗按钮，
+    会打断 CommonLoad 并留下永久 NOW LOADING。这里统一收口，任何 routine 的
+    click_by_path 都不能越过仍活跃或刚要启动的转场。
+    """
     try:
+        # 点击前也取一个短连续空闲窗口，堵住“检查瞬间 idle、下一帧刚好激活”
+        # 的最后一道竞态；程序连打宁可多等半秒，不拿整次游戏重启冒险。
+        if not wait_transition_done(device, initial=0.5):
+            raise TransitionTimeout(f"点击前转场未结束: {path}")
         device.click_by_path(path)
-        return True
+    except TransitionTimeout:
+        raise
     except Exception:
         return False
+    if not wait_transition_done(device):
+        raise TransitionTimeout(f"点击后转场未结束: {path}")
+    return True
 
 
 def wait_scene(device, names: set[str], timeout: float, poll: float = 2.0) -> str | None:
@@ -142,6 +161,8 @@ def transition_busy(device) -> bool:
     """转场 loading 是否在播：Transition canvas 平时仅 2 个 eff-active 节点
     （Transition+TransitionService），转场时整组激活（实测 ~20，持续 1-2s）。
     注意场景名在转场中段就会切换，画面 diff 也可能很小——不能靠它们判断转场。"""
+    if not hasattr(device, "ui_tree"):
+        return False
     t = device.ui_tree(canvas="Transition", max_nodes=300)
     n = 0
     for cv in t.get("canvases", []):
@@ -153,20 +174,35 @@ def transition_busy(device) -> bool:
     return False
 
 
-def wait_transition_done(device, timeout: float = 15.0, poll: float = 0.4,
-                         initial: float = 0.5) -> bool:
-    """等转场动画播完（点击打断 CommonLoad 会 NOW LOAD 卡屏，实测 2026-08-30）。
+def wait_transition_done(device, timeout: float = 15.0, poll: float = 0.25,
+                         initial: float = 1.5, quiet: float = 0.5) -> bool:
+    """观察一次可能延迟启动的转场，直到连续空闲后才放行下一次点击。
 
-    initial: 点击到转场层激活有延迟窗口，先睡一段再开始轮询，否则会漏检。
-    返回 False = 超时，疑似转场卡死——此时任何点击都无效，调用方应停止点击。
+    旧版只在固定睡 0.5s 后查一次：Transition 若在 0.5s 之后才激活，就会被当成
+    “没有转场”立即放行。这里即使暂时未看到 busy，也会覆盖完整启动宽限期；一旦
+    看到 busy，则必须再取得连续 ``quiet`` 秒空闲。按轮询次数实现，假设备把 sleep
+    替换为空操作时测试也不会忙等真实时钟。
     """
-    time.sleep(initial)
-    t0 = time.time()
-    while transition_busy(device):
-        if time.time() - t0 > timeout:
-            return False
-        time.sleep(poll)
-    return True
+    if not hasattr(device, "ui_tree"):
+        return True
+    poll = max(0.05, float(poll))
+    max_polls = max(1, math.ceil(max(0.0, float(timeout)) / poll))
+    grace_polls = max(0, math.ceil(max(0.0, float(initial)) / poll))
+    quiet_polls = max(1, math.ceil(max(0.0, float(quiet)) / poll))
+    busy_seen = False
+    idle_streak = 0
+    for sample in range(1, max_polls + 1):
+        if transition_busy(device):
+            busy_seen = True
+            idle_streak = 0
+        else:
+            idle_streak += 1
+            grace_done = busy_seen or sample >= grace_polls
+            if grace_done and idle_streak >= quiet_polls:
+                return True
+        if sample < max_polls:
+            time.sleep(poll)
+    return False
 
 
 def popup_cancel_consume(tree) -> str | None:
@@ -239,8 +275,7 @@ def battle_and_return(device, home_scene: str, log=print, timeout: float = 300.0
         if sc == home_scene:
             # 转场动画必须播完才能点下一场：点击打断 CommonLoad 会 NOW LOAD 卡屏
             if not wait_transition_done(device):
-                log("  [battle] 回到 home 但转场疑似卡死，停止点击")
-                return False
+                raise TransitionTimeout(f"回到 {home_scene} 后 Transition 未结束")
             device.wait_settled(device.screenshot(), max_wait=4.0)
             front = device.ui_tree(canvas="Front", max_nodes=2000)
             act = settle_step(front)
@@ -272,9 +307,8 @@ def battle_and_return(device, home_scene: str, log=print, timeout: float = 300.0
                     device.skip_page()
                 except Exception:
                     pass
-            if not wait_transition_done(device):
-                log("  [battle] 结算点击后转场疑似卡死")
-                return False
+                if not wait_transition_done(device):
+                    raise TransitionTimeout("结算跳页后 Transition 未结束")
             time.sleep(0.5)
             continue
         # 其它场景（转场/未知弹窗）：先查消费红线，再试清理，否则等
@@ -287,9 +321,6 @@ def battle_and_return(device, home_scene: str, log=print, timeout: float = 300.0
         act = settle_step(front)
         if act:
             click_path(device, act)
-            if not wait_transition_done(device):
-                log("  [battle] 弹窗清理后转场疑似卡死")
-                return False
         time.sleep(1.0)
     log(f"  [battle] 超时未回到 {home_scene}")
     return False

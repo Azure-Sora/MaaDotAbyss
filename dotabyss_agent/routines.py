@@ -9,6 +9,7 @@ partial = 中途卡住/可疑，剩余情况已写入 detail，由 LLM 兜底决
 import re
 import time
 
+from .daily_routines import claim_idle_reward
 from .macros import (
     battle_and_return, click_path, collect_buttons, collect_texts, find_btn,
     popup_cancel_consume, scene, walk,
@@ -368,6 +369,7 @@ def expedition_sweep(device, log=print, stop_event=None, frame_cb=None,
 
 
 ROUTINES = {
+    "claim_idle_reward": claim_idle_reward,
     "forces_sweep": forces_sweep,
     "disaster_sweep": disaster_sweep,
     "expedition_sweep": expedition_sweep,
@@ -389,6 +391,7 @@ def _adap(fn):
 
 
 ROUTINES = {
+    "claim_idle_reward": _adap(claim_idle_reward),
     "forces_sweep": _adap(forces_sweep),
     "disaster_sweep": _adap(disaster_sweep),
     "expedition_sweep": _adap(expedition_sweep),

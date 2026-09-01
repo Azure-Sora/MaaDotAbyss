@@ -50,6 +50,22 @@ def ensure_home(device, log=print, max_rounds: int = 8) -> bool:
 ANCHOR_W, ANCHOR_H = 150, 75  # 默认锚点裁剪尺寸（以点击点为中心）
 CANDIDATE_SIZES = [(150, 75), (110, 55), (80, 40), (64, 32)]
 OFFSET_TRIES = [(0, 0), (0, -14), (-14, 0), (14, 0), (0, 14)]
+SCORE_TIE = 0.015
+
+
+def _prefer_smaller(candidate, best, *, score_idx=0, width_idx=3, height_idx=4) -> bool:
+    """相关分几乎相同时选更小模板，避免把按钮旁的动态角标一起沉淀。"""
+    if best is None:
+        return True
+    score = float(candidate[score_idx])
+    best_score = float(best[score_idx])
+    if score > best_score + SCORE_TIE:
+        return True
+    if abs(score - best_score) <= SCORE_TIE:
+        area = int(candidate[width_idx]) * int(candidate[height_idx])
+        best_area = int(best[width_idx]) * int(best[height_idx])
+        return area < best_area
+    return False
 
 
 def _calibrate_anchor(pre_rgb: Image.Image, cx: int, cy: int, cur_bgr, adir: Path, name: str, log) -> dict:
@@ -67,10 +83,8 @@ def _calibrate_anchor(pre_rgb: Image.Image, cx: int, cy: int, cur_bgr, adir: Pat
             else:
                 score, loc = 1.0, (0, 0)
             cand = (score, x0, y0, w, h)
-            if best is None or score > best[0]:
+            if _prefer_smaller(cand, best):
                 best = cand
-        if best and best[0] >= 0.97:  # 已近满分，没必要再试更小的
-            break
     if best is None:
         return {"anchor": name, "threshold": 0.85}
     score, x0, y0, w, h = best
@@ -269,8 +283,7 @@ def _best_candidate(img_pre_rgb: Image.Image, cx: int, cy: int, cur_bgr: np.ndar
             crop = pre_bgr[y0:y0 + h, x0:x0 + w]
             res = cv2.matchTemplate(cur_bgr, crop, cv2.TM_CCOEFF_NORMED)
             _, score, _, loc = cv2.minMaxLoc(res)
-            if best is None or score > best[0]:
-                best = (score, (loc[0] + w // 2, loc[1] + h // 2), w, h, crop.copy())
-        if best and best[0] >= 0.98:
-            break
+            cand = (score, (loc[0] + w // 2, loc[1] + h // 2), w, h, crop.copy())
+            if _prefer_smaller(cand, best, width_idx=2, height_idx=3):
+                best = cand
     return best

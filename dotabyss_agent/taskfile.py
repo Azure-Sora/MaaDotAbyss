@@ -90,17 +90,17 @@ def delete_task(task_id: str, path: Path = DAILY_YAML) -> None:
 
 
 def update_task(task_id: str, *, name=None, prompt=None, exit_condition=None,
-                supplement=None, path: Path = DAILY_YAML) -> None:
-    """改单个任务的字段。None=不动；supplement 传 "" 表示移除该字段。"""
+                supplement=None, flow=None, path: Path = DAILY_YAML) -> None:
+    """改单个任务的字段。None=不动；supplement/flow 传 "" 表示移除字段。"""
     head, blocks, ids = _load_blocks(path)
     if task_id not in ids:
         raise TaskFileError(f"任务不存在: {task_id}")
     block = blocks[ids.index(task_id)]
-    for key, val in (("name", name), ("prompt", prompt),
+    for key, val in (("name", name), ("flow", flow), ("prompt", prompt),
                      ("exit_condition", exit_condition), ("supplement", supplement)):
         if val is None:
             continue
-        if key == "supplement" and not str(val).strip():
+        if key in {"supplement", "flow"} and not str(val).strip():
             _remove_field(block, key)
             continue
         _set_field(block, key, str(val))

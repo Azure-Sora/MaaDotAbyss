@@ -1,9 +1,13 @@
 name: 新领取礼物
 steps:
 - name: 点击礼物按钮进入礼物页
+  context:
+    anchor: common/home_btn.png
+    threshold: 0.85
   find:
     anchor: s1.png
     threshold: 0.94
+  no_match: done_ok
   retry: 2
   act: click
   expect:

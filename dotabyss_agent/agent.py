@@ -14,7 +14,7 @@ from PIL import Image
 from .brain import Brain, BrainError
 from .config import HISTORY_KEEP, KNOWLEDGE_DIR, RUNS_DIR
 from .device import GameDevice
-from .macros import observe_buttons, wait_transition_done
+from .macros import TransitionTimeout, observe_buttons, wait_transition_done
 from .routines import ROUTINES, save_and_register
 
 COORD_LIMIT = (1280, 720)
@@ -95,7 +95,7 @@ def run_task(
     frame_cb: callable(frame)，每步截图回调（GUI 预览用）。
     event_cb: callable(dict)，结构化事件回调（GUI 决策流用）：
               每步 {"type":"step", task, step, action, detail, thought, frame}。
-    record: 探索录制——保存每次点击的前帧与坐标（供剧本生成）。
+    record: 学习录制——保存动作轨迹，以及每次有效点击的前帧与坐标（供剧本生成）。
     """
     tid = task["id"]
     run_dir = RUNS_DIR / datetime.now().strftime("%Y%m%d_%H%M%S") / tid
@@ -188,6 +188,15 @@ def run_task(
                 })
             except Exception:
                 pass
+
+        # click 在确认真实命中后再记录；其余动作先写进完整轨迹。flowgen 仍只消费
+        # action=click，而 evolution 会据此拒绝尚不能完整表达 auto/skip 等动作的轨迹。
+        if record and act != "click":
+            trace_row = {"step": step, "action": str(act or ""), "thought": thought}
+            for key in ("routine", "path", "seconds", "timeout", "status", "evidence"):
+                if key in action:
+                    trace_row[key] = action[key]
+            record_list.append(trace_row)
 
         if act == "click":
             x, y = int(action.get("x", -1)), int(action.get("y", -1))
@@ -326,7 +335,11 @@ def run_task(
             try:
                 res = fn(device, action.get("params") or {}, log=log,
                          stop_event=stop_event, frame_cb=frame_cb)
-            except Exception as e:  # routine 内部异常不当任务失败，交 LLM 决断
+            except TransitionTimeout as e:
+                # 这种异常不是“换模型再点几下”能恢复的；继续发输入只会加重
+                # CommonLoad 卡死，直接熔断整条日常。
+                res = {"status": "blocked", "cleared": 0, "detail": str(e)}
+            except Exception as e:  # 其它 routine 异常交 LLM 决断
                 res = {"status": "partial", "cleared": 0,
                        "detail": f"{e.__class__.__name__}: {e}"}
             # 编排跑通且要求存盘 → 注册为命名 routine 供下次直呼
@@ -346,11 +359,15 @@ def run_task(
                 "done": "程序已清剿完毕，请继续任务剩余步骤",
                 "wrong_scene": "还不在入口页——请先按任务路径导航到入口页后再调 auto",
                 "partial": f"程序中途交还控制权，按 detail 判断：接手处理或换目标",
+                "blocked": "转场已熔断，禁止继续点击",
             }.get(status, "按 detail 处理")
             history.append(f"step{step}: [auto {rid}] status={status} "
                            f"cleared={res.get('cleared', 0)}｜{res.get('detail', '')}｜{hint}")
             log(f"step{step}: [auto {rid}] {status} cleared={res.get('cleared', 0)} "
                 f"{res.get('detail', '')}")
+            if status == "blocked":
+                result.update(status="blocked", steps=step, detail=res.get("detail", "转场异常"))
+                break
             frame2 = device.screenshot()
             _save_frame(frame2, run_dir, f"step{step:02d}_after_auto.png")
             if frame_cb is not None:
@@ -364,11 +381,22 @@ def run_task(
             if status == "done":
                 frame2 = device.screenshot()
                 _save_frame(frame2, run_dir, "verify.png")
-                _emit_thinking(event_cb, "start")
-                try:
-                    ok, reason = brain.verify(task["prompt"], task.get("exit_condition", ""), frame2)
-                finally:
-                    _emit_thinking(event_cb, "done", brain)
+                evidence = str(action.get("evidence", "")).strip()
+                validation = str(task.get("validation", "inline")).strip().lower()
+                # decide 本来就是在新鲜画面上做出的结论。默认复用它随 report 提交的
+                # 可见证据，避免同一模型紧接着再看同一张图做一次昂贵重复判断。
+                # 资源消费/高风险任务可在 daily.yaml 显式设 validation: strict。
+                if validation != "strict" and evidence:
+                    ok, reason = True, f"本轮画面证据：{evidence}"
+                    log(f"step{step}: [verify:inline] {evidence}")
+                else:
+                    _emit_thinking(event_cb, "start")
+                    try:
+                        ok, reason = brain.verify(
+                            task["prompt"], task.get("exit_condition", ""), frame2
+                        )
+                    finally:
+                        _emit_thinking(event_cb, "done", brain)
                 if ok:
                     if update_knowledge:
                         try:

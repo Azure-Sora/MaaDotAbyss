@@ -35,6 +35,10 @@ class FakeDevice:
         self.clicks.append((x, y))
         self.frame[:, :, 0] = (self.frame[:, :, 0] + 30) % 255  # 画面变化 → eff>0.02
 
+    def tap(self, x, y):
+        self.click(x, y)
+        return True
+
     def swipe(self, *a, **k):
         pass
 
