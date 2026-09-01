@@ -540,6 +540,37 @@ def _resolve_event(device, led: AbyssLedger, brain, log=print) -> None:
                     return b
             return None
 
+        def wcheck(n):
+            yield n
+            for c in n.get("children", []):
+                yield from wcheck(c)
+
+        def _cards(t):
+            """选项卡 [(button dict, title, title screen)]：popup 子树中「子树含
+            TitleText」的按钮。布局两型（42F 实测）：Choice/Choice_N/Button 与 popup
+            直挂 Button；后者按钮常无 screen 字段，坐标以 TitleText 的为准。"""
+            popup = next((n for n in _walk_all(t)
+                          if n["name"].startswith("Popup_NetherEvent")), None)
+            if popup is None:
+                return []
+            out = []
+            for n in wcheck(popup):
+                b = n.get("button")
+                if not b:
+                    continue
+                tnode = next((c for c in wcheck(n)
+                              if c.get("name") == "TitleText" and c.get("text")), None)
+                if tnode:
+                    out.append((b, tnode.get("text"), tnode.get("screen")))
+            return out
+
+        # 覆盖层入场动画期选项卡/按钮未挂全（42F 实测空表被误判死局），等就绪
+        for _ in range(8):
+            if sum(1 for _b, _tt, tscr in _cards(tree)
+                   if tscr and tscr[0] >= 0) >= 2:
+                break
+            time.sleep(1.0)
+            tree = device.ui_tree(max_nodes=30000)
         # 选项卡 = TitleText（标题）+ 同级 Text（效果标签），同 x 邻域归组
         titles = [n for n in _walk_all(tree) if n["name"] == "TitleText" and n.get("text")]
         texts = [n for n in _walk_all(tree) if n["name"] == "Text" and n.get("text")]
@@ -562,9 +593,6 @@ def _resolve_event(device, led: AbyssLedger, brain, log=print) -> None:
 
         def parse(o):
             d = o["desc"]
-            # 锁定有两种文案：選択できません / 〜条件を満たしていない（31F 实测）
-            locked = ("選択できません" in d or "選択できません" in o["title"]
-                      or "条件を満たしていない" in d or "条件を満たしていない" in o["title"])
             m = re.search(r"浸食率\s*(\d+)\s*上昇", d)
             ec = int(m.group(1)) if m else 0
             m = re.search(r"浸食率\s*(\d+)\s*減少|浸食率\s*減少\s*(\d+)", d)
@@ -574,47 +602,40 @@ def _resolve_event(device, led: AbyssLedger, brain, log=print) -> None:
             m = re.search(r"(\d+)\s*個消費", d)
             coin = int(m.group(1)) if m else 0
             return {"hp_cost": hp, "erosion_cost": ec, "erosion_gain": eg,
-                    "coin_cost": coin, "locked": locked,
+                    "coin_cost": coin,
                     "code_gain": "コード" in d and "獲得" in d,
                     "item_gain": "アイテム" in d and "選択" in d}
 
+        # 选项可选性 = 选项卡按钮 interactable（42F 实测）：文案「条件を満たしていない/
+        # 選択できません」不代表不可选——按钮活即可选，確定会亮、效果照常发生。事件是
+        # 必答题：进房后不能横走/后退，X 关闭会自动重弹、地图锁死到选完为止，唯一出路
+        # 是完成一个可选选项。文案 locked 判定弃用。屏外装饰卡（x<0）排除。
         parsed = [parse(o) for o in options]
-        if not any(not q["locked"] for q in parsed):
-            # 全锁定：点击无法確定、X 跳过是唯一出路（42F 死循环实测；8-29「X 不可
-            # 跳过」结论已过时）。锁定文案若遇变种漏判，下方確定检查仍会兜住。
-            log("  事件选项全部锁定——X 跳过该事件")
-            cl = _event_btn("Button_Close")
-            if cl and cl.get("interactable"):
-                device.click_by_path(cl["path"])
-                log("  事件 X 跳过")
-            elif not _skip_overlay_by_corner(device, log=log):
-                raise RuntimeError("事件全锁定且 X/左上角均无法跳过——需人工")
-            return
-        i = max((k for k, p in enumerate(parsed) if not p["locked"]),
-                key=lambda k: event_score(parsed[k], led))
-        o = options[i]
-        log(f"  事件『{o['title']}』效果={o['desc'][:40]!r}"
-            + ("（锁定，备选）" if parsed[i]["locked"] else ""))
-        if not _click_text_center(device, tree, o["title"], log=log):
-            raise RuntimeError("事件选项点击失败")
-        time.sleep(0.6)
-
-
-        cf = _event_btn("Button_Confirm")
-        if cf and cf.get("interactable"):
-            device.click_by_path(cf["path"])
-            log("  点击 確定")
-        else:
-            # 锁定选项点击无反应、確定不亮（42F 实测：三选项全锁时死循环）——
-            # X 跳过是唯一出路（8-29「X 不可跳过」结论已过时，多轮事件版 X 实测有效）
-            log("  確定不可用（选项锁定）——X 跳过该事件")
-            cl = _event_btn("Button_Close")
-            if cl and cl.get("interactable"):
-                device.click_by_path(cl["path"])
-                log("  事件 X 跳过")
-            elif not _skip_overlay_by_corner(device, log=log):
-                raise RuntimeError("事件全锁定且 X/左上角均无法跳过——需人工")
-            return
+        cards = {tt: (b, tscr) for b, tt, tscr in _cards(tree)}
+        for o in options:
+            b, _tscr = cards.get(o["title"], (None, None))
+            o["selectable"] = bool(b and b.get("interactable")
+                                   and o["screen"] and o["screen"][0] >= 0)
+        order = sorted((k for k, o in enumerate(options) if o["selectable"]),
+                       key=lambda k: event_score(parsed[k], led), reverse=True)
+        if not order:
+            raise RuntimeError("事件所有选项按钮均不可选（疑似死局）——需人工")
+        confirmed = False
+        for k in order:
+            o = options[k]
+            log(f"  事件『{o['title']}』效果={o['desc'][:40]!r}")
+            if not _click_text_center(device, tree, o["title"], log=log):
+                continue
+            time.sleep(0.6)
+            cf = _event_btn("Button_Confirm")
+            if cf and cf.get("interactable"):
+                device.click_by_path(cf["path"])
+                log("  点击 確定")
+                confirmed = True
+                break
+            log("  確定未亮，换下一个可选选项")
+        if not confirmed:
+            raise RuntimeError("事件没有任何可確定的选项——需人工")
         p = parse(o)
         led.hp_lost_pct += p["hp_cost"]
         led.erosion = max(0, led.erosion - p["erosion_gain"] + p["erosion_cost"])
@@ -635,6 +656,9 @@ def _resolve_event(device, led: AbyssLedger, brain, log=print) -> None:
             tree = device.ui_tree(max_nodes=30000)
             if _event_overlay_present(tree):
                 break               # 下一轮事件，回外层继续
+            if _overlay_present(tree):
+                _result_step(device, led, brain, log=log, tree=tree)   # 事件结果页(確認して次へ)
+                continue
             if saw_other or i > 3:
                 return              # 打完回图；或无战斗直接回图
         else:
