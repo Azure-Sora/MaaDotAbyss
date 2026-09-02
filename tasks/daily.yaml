@@ -55,6 +55,7 @@ tasks:
       - 若 disaster_skip_sweep 报错 → 改用旧程序 disaster_sweep 兜底（逐个打）：{"action": "auto", "routine": "disaster_sweep"}。
       不要自己逐个 boss 连打（太慢会耗尽时间预算）。
     exit_condition: 已回到主页面（底部导航可见，无弹窗）。
+    supplement: 现在的接管程序有bug，只会打第一个boss后跳过第二个，但第三个boss也应该跳过
 
   - id: expedition
     name: 探索队-探索任务
@@ -72,12 +73,11 @@ tasks:
   - id: claim_missions
     name: 任务一键领取
     prompt: |
-      在主页面点击右侧的"任务"按钮（列表图标；日文 任務 同样是它）。
-      进入任务页面后，使用"一键领取/一括受け取り"类按钮领取全部已完成的任务奖励；
+      在主页面点击右侧的“任务”按钮（列表图标；日文 任務 同样是它）。
+      进入任务页面后，一直点击“一键领取/一括受け取り”按钮，直到按钮变灰为止，所有任务的奖励都能这样领取，不需要手动切换页签复查；
       领取过程中出现的获得物品弹窗逐个关闭。
       完成后返回主页面。
     exit_condition: 任务页面中没有仍然可领取（高亮领取按钮）的任务，且无弹窗遮挡。
-    supplement: 只需要在进入任务列表后一直点一键领取直到一键领取变灰即可，所有任务都能这样领到奖励，不需要手动切换页签复查
   - id: daily_pack
     name: 每日免费礼包
     flow: daily_pack          # 教学：先剧本后 LLM 兜底

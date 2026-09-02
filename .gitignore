@@ -14,3 +14,11 @@ bridge/Directory.Build.props
 /build/
 /dist/
 *.spec
+
+# CodeGraph 本地索引
+.codegraph/
+
+# 个人规划/会话文档,不入库
+findings.md
+progress.md
+task_plan.md

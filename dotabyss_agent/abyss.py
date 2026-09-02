@@ -15,6 +15,10 @@
 （跳过会把倍率锁 1 倍、少拿 10 层收益，_skip_confirm_decline）。
 入场流チケット使用之后还有 編成確認（Popup_Confirm_NetherParty，深淵内では編成の
 変更ができません）——固定 挑む（_party_confirm_challenge，仅入场流、续行流无此步）。
+
+2026-09-02 新增：代码弹窗退场核验（_close_out_popup）——弹窗确认后偶发关闭动画
+冻结成僵尸（不可见+確認/キャンセル/左上角全关不掉+全屏卡片锁输入，唯一解法重启
+游戏），点完必须等它真消失，射线补点仍不退就报错停机；左上角跳过前留生成窗复查。
 """
 import json
 import re
@@ -234,6 +238,94 @@ def resolve_battle(device, led: AbyssLedger, brain, log=print, timeout: float = 
     raise RuntimeError("结算流超时未回地图")
 
 
+# 僵尸弹窗（2026-09-02 实测定性）：代码弹窗偶发带着冻结的开场动画出生——
+# 整体不可见、三卡同亮「選択中」、確認不亮；内部按钮逻辑还活着（选卡/リロール
+# 有反应）但关闭链路全死（確認/キャンセル/左上角均不退场），全屏卡片还吃掉所有
+# 射线点击 = 输入彻底锁死。唯一解法是重启游戏。诱因是上一个浮层跳过/弹窗关闭
+# 动画进行中时下一个弹窗抢生（拿码后连掉两码时必现）。
+ZOMBIE_POPUP_MSG = (
+    "深渊代码弹窗变僵尸（开场动画冻结：不可见且確認/キャンセル均无法关闭，"
+    "输入已被锁死）——请重启游戏后从检查点继续"
+)
+
+
+def _code_popup_on_screen(device) -> bool:
+    return _code_popup_present(device.ui_tree(max_nodes=30000))
+
+
+def _wait_popup_gone(device, timeout: float) -> bool:
+    """轮询等代码弹窗从树上消失（只读不点，转场期间也安全）。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        time.sleep(0.8)
+        if not _code_popup_on_screen(device):
+            return True
+    return False
+
+
+def _settle_after_popup(device) -> None:
+    """弹窗退场后先等转场播完，再给一拍：拿码确认页/下一个弹窗要 1-2s 后才挂出，
+    这段时间里的任何点击都可能打断动画链（卡 LOADING / 僵尸弹窗的诱因）。"""
+    from .macros import wait_transition_done
+    wait_transition_done(device)
+    time.sleep(1.0)
+
+
+def _ray_click_popup_btn(device, popup, suffix: str, log=print) -> bool:
+    """射线真实点击弹窗内指定按钮（onClick.Invoke 不走交互事件层，个别状态只认射线）。"""
+    def walk(n):
+        yield n
+        for c in n.get("children", []):
+            yield from walk(c)
+    for n in walk(popup):
+        b = n.get("button")
+        if b and b["path"].endswith(suffix) and n.get("screen"):
+            cx = (n["screen"][0] + n["screen"][2]) // 2
+            cy = (n["screen"][1] + n["screen"][3]) // 2
+            try:
+                device.click_ui(cx, cy)
+                log(f"  射线点击 {suffix} @ ({cx},{cy})")
+                return True
+            except Exception:
+                return False
+    return False
+
+
+def _wait_code_popup_window(device, timeout: float = 6.0, poll: float = 0.8,
+                            log=print) -> bool:
+    """结算按钮按下前的代码弹窗挂出窗口。弹窗挂出晚于 Button_Next 亮起（结算动画
+    还在播），不等就点 = 100% 抢跑（2026-09-02 实战）：结算页被推走、弹窗拖到回图
+    后才挂到地图上——地图上处理弹窗时序脆弱，正是僵尸弹窗的温床。只轻量读
+    Front 画布（弹窗固定挂 Front/PopupService）。True=弹窗已挂出，交回调用方处理。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if _code_popup_present(device.ui_tree(canvas="Front", max_nodes=5000)):
+            return True
+        time.sleep(poll)
+    return False
+
+
+def _close_out_popup(device, popup, log=print) -> None:
+    """確認/キャンセル点完后的退场核验：弹窗必须真从树上消失。
+    不退先射线补点 確定（Invoke 不走交互事件层，个别状态只认射线），再不退试
+    キャンセル；两条路都关不掉 = 僵尸弹窗（2026-09-02 实测定性，见
+    ZOMBIE_POPUP_MSG）——输入已被全屏卡片锁死，继续任何点击都无效甚至更乱，
+    立刻抛错止损等人工重启。"""
+    if _wait_popup_gone(device, 6.0):
+        _settle_after_popup(device)
+        return
+    log("  確定后弹窗未退场，射线补点 確定")
+    _ray_click_popup_btn(device, popup, "ButtonSet/Button_Confirm", log=log)
+    if _wait_popup_gone(device, 5.0):
+        _settle_after_popup(device)
+        return
+    _ray_click_popup_btn(device, popup, "ButtonSet/Button_Cancel", log=log)
+    if _wait_popup_gone(device, 4.0):
+        _settle_after_popup(device)
+        return
+    raise RuntimeError(ZOMBIE_POPUP_MSG)
+
+
 def _overlay_popup_open(tree) -> bool:
     """PopupService 下是否有弹窗本体（商店/宝箱等覆盖层开着时场景名仍是 Nether）。"""
     for n in _walk_all(tree):
@@ -304,8 +396,15 @@ def _skip_overlay_by_corner(device, log=print) -> bool:
     """无按钮浮层的唯一安全关法：点屏幕最左上角整页跳过。这类页面（確認して次へ/
     拿码确认页）的文本不是射线目标，直接点文本或 Invoke 底层按钮都会穿透（实测
     2026-08-30/09-01）；左上角只会命中全屏接管层。click_ui 优先（全屏层未必是
-    Button），click 兜底。"""
+    Button），click 兜底。
+    跳过前留 1.2s 生成窗再复查：跳过瞬间正是下一个代码弹窗的挂出时刻，抢跳会让
+    它带着冻结的开场动画出生（僵尸弹窗，ZOMBIE_POPUP_MSG）。发现弹窗即放弃跳过，
+    交回调用方循环先处理弹窗。"""
     from .macros import wait_transition_done
+    time.sleep(1.2)
+    if _code_popup_on_screen(device):
+        log("  左上角跳过前发现代码弹窗挂出，改为先处理弹窗")
+        return False
     for call in (device.click_ui, device.click):
         try:
             p = call(0, 0)
@@ -346,6 +445,11 @@ def _result_step(device, led: AbyssLedger, brain, log=print, tree: dict | None =
             nm = n["name"]
             if nm in ("Button_Next", "Button_ToExploration", "Button_ToNextQuest") \
                     and n["button"].get("interactable"):
+                # 点前留弹窗挂出窗口：掉落弹窗挂出晚于按钮亮起，抢跑=回图后才弹
+                # （正确时序是 Result 内选码 → 继续 → 回图，2026-09-02 用户指认）
+                if _wait_code_popup_window(device, log=log):
+                    _handle_code_popup(device, led, brain, log=log)
+                    return True
                 device.click_by_path(n["button"]["path"])
                 log(f"  点击 {nm}")
                 from .macros import wait_transition_done
@@ -402,6 +506,9 @@ def _handle_code_popup(device, led: AbyssLedger, brain, log=print) -> None:
         return
     if brain is not None:
         _classify_codes_vision(device, [o for o in options if o["color"] is None], brain, log=log)
+    # 点选前确认没有转场在播——CommonLoad 压着弹窗动画是僵尸弹窗的诱因之一
+    from .macros import wait_transition_done
+    wait_transition_done(device)
     m = re.search(r"残り\s*(\d+)", json.dumps(
         [(x.get("text") or "") for x in walk(popup)], ensure_ascii=False))
     rerolls = int(m.group(1)) if m else 0
@@ -414,6 +521,7 @@ def _handle_code_popup(device, led: AbyssLedger, brain, log=print) -> None:
         return
     if verb == "skip":
         device.click_by_path(_popup_btn(popup, "Button_Cancel"))   # 受け取らない
+        _close_out_popup(device, popup, log=log)
         return
     o = options[idx]
     device.click_by_path(_popup_btn(popup, f"Code_{o['idx']}/AbyssCode_{o['idx']}"))
@@ -422,6 +530,7 @@ def _handle_code_popup(device, led: AbyssLedger, brain, log=print) -> None:
     color = o["color"] or "unknown"
     led.buffs[color] = led.buffs.get(color, 0) + 1   # buffs 懒初始化：in 判断会漏掉首码
     log(f"  拿码 {o['name']}（{color}，战力 {o['power']}）")
+    _close_out_popup(device, popup, log=log)   # 拿码不算数，弹窗退场才算数
 
 
 def _popup_btn(popup, suffix: str) -> str:
@@ -1032,6 +1141,8 @@ def run_to_floor(device, led: AbyssLedger, brain=None, log=print,
             enter_room(device, room, log=log)
             resolve_room(device, room, led, brain, log=log)
         except Exception as e:
+            if ZOMBIE_POPUP_MSG in str(e):
+                raise   # 输入已被僵尸弹窗锁死，自救点击全无效，直接停等人工
             log(f"  [异常] {e}——尝试 LLM 自救")
             if not _llm_rescue(device, brain, f"进入/解决 {room.type} 房间", log=log):
                 raise
