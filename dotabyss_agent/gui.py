@@ -53,7 +53,7 @@ from qfluentwidgets import (
 from qfluentwidgets.components.widgets.spin_box import SpinButton, SpinIcon
 from qfluentwidgets.common.style_sheet import isDarkTheme
 
-from .config import ROOT
+from .config import LOCAL_DIR, ROOT
 from .modelstore import discover_models, store
 from .control import CtlError, ControlServer, SHOTS_DIR, save_frame
 from .device import DeviceError
@@ -64,6 +64,7 @@ from .usage_page import UsagePage
 PREVIEW_W, PREVIEW_H = 512, 288   # 1280x720 缩放
 THUMB_W, THUMB_H = 160, 90        # 时间线缩略图
 MAX_CARDS = 120                   # 决策流保留步数
+ABYSS_PARAMS_PATH = LOCAL_DIR / "abyss_params.json"   # 深渊页参数记忆
 
 ACTION_ZH = {"click": "点击 ", "wait": "等待 ", "wait_stable": "等待画面稳定",
              "report": "上报 → ", "skip": "左上角跳页", "auto": "程序接管 → "}
@@ -885,6 +886,38 @@ class AbyssPage(QWidget):
         state.sig.ledger.connect(self._on_ledger)
         state.sig.result.connect(self._on_result)
         state.sig.running.connect(self._on_running)
+        self._load_params()
+
+    # ---- 参数记忆（.local/abyss_params.json：下次打开恢复上次填的值） ----
+
+    def _save_params(self):
+        data = {
+            "target": self.target.value(),
+            "start_floor": self.start_floor.value(),
+            "max_rooms": self.max_rooms.value(),
+            "quota": {c: sp.value() for c, sp in self.quota_spins.items()},
+        }
+        try:
+            ABYSS_PARAMS_PATH.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _load_params(self):
+        try:
+            data = json.loads(ABYSS_PARAMS_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        for key, w in (("target", self.target), ("start_floor", self.start_floor),
+                       ("max_rooms", self.max_rooms)):
+            v = data.get(key)
+            if isinstance(v, (int, float)):
+                w.setValue(int(v))       # 超范围时 Qt 自动钳回合法区间
+        quota = data.get("quota")
+        if isinstance(quota, dict):
+            for c, sp in self.quota_spins.items():
+                v = quota.get(c)
+                if isinstance(v, (int, float)):
+                    sp.setValue(int(v))
 
     # ---- 启停 ----
 
@@ -916,6 +949,7 @@ class AbyssPage(QWidget):
         for val in self.ledger_vals.values():
             val.setText("-")
         args = (target, start_floor, quota, self.provider.currentText(), self.max_rooms.value())
+        self._save_params()     # 启动即记住本次填法，下次打开自动恢复
         self.state.worker = threading.Thread(target=self._work, args=args, daemon=True)
         self.state.worker.start()
         self.state.sig.running.emit(True)
