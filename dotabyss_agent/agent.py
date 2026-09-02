@@ -74,6 +74,7 @@ def run_task(
 ) -> dict:
     """执行单个任务；外部返回 dict 契约保持兼容。"""
     task_id = task["id"]
+    brain.task_ctx = task_id          # 用量统计归属（executor 里的验收/知识卡同享）
     run_dir = RUNS_DIR / datetime.now().strftime("%Y%m%d_%H%M%S") / task_id
     knowledge = load_knowledge(task_id)
     supplement = str(task.get("supplement") or "").strip()

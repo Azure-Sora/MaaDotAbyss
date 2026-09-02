@@ -2,6 +2,7 @@
 import base64
 import json
 import re
+import time
 from io import BytesIO
 
 import numpy as np
@@ -10,6 +11,7 @@ from PIL import Image
 
 from .config import MAX_COMPLETION_TOKENS
 from .modelstore import store
+from . import usage
 
 SYSTEM_PROMPT = """你是《DOT ABYSS》(ドットアビスX) 游戏的自动化操作助手，通过截图观察画面并给出下一步操作。
 
@@ -98,19 +100,47 @@ class Brain:
         self.client = OpenAI(api_key=store.key(name), base_url=cfg["base_url"])
         self.model = cfg["model"]
         self.provider = name
+        self.task_ctx: str | None = None    # 用量统计的任务归属，各运行入口赋值
 
     # ---- 基础调用 -----------------------------------------------------
 
-    def _chat(self, content: list, system: str = SYSTEM_PROMPT) -> str:
-        resp = self.client.chat.completions.create(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": content},
-            ],
-            max_completion_tokens=MAX_COMPLETION_TOKENS,
-        )
-        self.last_completion_tokens = getattr(resp.usage, "completion_tokens", None)
+    @staticmethod
+    def _detail_num(detail, key: str):
+        """usage.xxx_details 里的子计数（各端点兼容度不一，缺省即 None）。"""
+        v = getattr(detail, key, None) if detail is not None else None
+        return v if isinstance(v, (int, float)) else None
+
+    def _chat(self, content: list, system: str = SYSTEM_PROMPT, scene: str = "misc") -> str:
+        """全项目唯一 chat 出口；每次调用（无论成败）落一条用量记录。"""
+        started = time.monotonic()
+        try:
+            resp = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": content},
+                ],
+                max_completion_tokens=MAX_COMPLETION_TOKENS,
+            )
+        except Exception as e:
+            usage.record(scene=scene, provider=self.provider, model=self.model,
+                         task=self.task_ctx, ok=False,
+                         latency_s=time.monotonic() - started,
+                         err=f"{e.__class__.__name__}: {e}")
+            raise
+        u = resp.usage
+        completion = getattr(u, "completion_tokens", None)
+        self.last_completion_tokens = completion
+        usage.record(scene=scene, provider=self.provider, model=self.model,
+                     task=self.task_ctx, ok=True,
+                     prompt_tokens=getattr(u, "prompt_tokens", None),
+                     completion_tokens=completion,
+                     cached_tokens=self._detail_num(
+                         getattr(u, "prompt_tokens_details", None), "cached_tokens"),
+                     reasoning_tokens=self._detail_num(
+                         getattr(u, "completion_tokens_details", None), "reasoning_tokens"),
+                     total_tokens=getattr(u, "total_tokens", None),
+                     latency_s=time.monotonic() - started)
         return resp.choices[0].message.content or ""
 
     @staticmethod
@@ -148,7 +178,7 @@ class Brain:
         lines.append("# 当前画面\n请给出下一步操作的 JSON。")
         content = [{"type": "text", "text": "\n\n".join(lines)}, self._image_part(frame_bgr)]
         try:
-            return self._parse_json(self._chat(content))
+            return self._parse_json(self._chat(content, scene="daily_decide"))
         except BrainError:
             # 一次纠正重试：要求严格只输出 JSON
             retry = content + [{
@@ -156,7 +186,7 @@ class Brain:
                 "text": "你上一次的输出无法解析为 JSON。请严格只输出一个 JSON 对象"
                         "（action 为 click/wait/wait_stable/skip/report 之一），不要任何其他文字。",
             }]
-            return self._parse_json(self._chat(retry))
+            return self._parse_json(self._chat(retry, scene="daily_decide_retry"))
 
     def decide_teach(self, goal: str, instructions: list[str], history: list[str], frame_bgr: np.ndarray) -> dict:
         """教学模式决策：目标 + 用户全部指示（即任务规格，永不裁剪）+ 近几步历史 + 当前帧。"""
@@ -171,14 +201,16 @@ class Brain:
         lines.append("# 当前画面\n给出下一步 JSON（action 可为 click/wait/wait_stable/skip/ask_user；仅网络错误才 report blocked）。")
         content = [{"type": "text", "text": "\n\n".join(lines)}, self._image_part(frame_bgr)]
         try:
-            return self._parse_json(self._chat(content, system=TEACH_SYSTEM_PROMPT))
+            return self._parse_json(self._chat(content, system=TEACH_SYSTEM_PROMPT,
+                                               scene="teach_decide"))
         except BrainError:
             retry = content + [{
                 "type": "text",
                 "text": "你上一次的输出无法解析为 JSON。请严格只输出一个 JSON 对象"
                         "（action 为 click/wait/wait_stable/skip/ask_user/report 之一），不要任何其他文字。",
             }]
-            return self._parse_json(self._chat(retry, system=TEACH_SYSTEM_PROMPT))
+            return self._parse_json(self._chat(retry, system=TEACH_SYSTEM_PROMPT,
+                                               scene="teach_decide_retry"))
 
     def summarize_session(self, task_name: str, goal: str, dialogue: list[str], record_lines: list[str]) -> dict:
         """教学会话蒸馏：用户对话（意图原始记录）+ 执行轨迹 → 任务三件套的规格。"""
@@ -197,6 +229,7 @@ class Brain:
         text = self._chat(
             [{"type": "text", "text": prompt}],
             system="你是自动化流程分析师，只输出一个 JSON 对象，禁止输出其他文字。",
+            scene="teach_distill",
         )
         data = self._parse_json(text)
         return {
@@ -205,8 +238,12 @@ class Brain:
             "notes": [str(x) for x in data.get("notes", [])][:6],
         }
 
-    def verify(self, task_prompt: str, exit_condition: str, frame_bgr: np.ndarray) -> tuple[bool, str]:
-        """完成验证：用一张新鲜截图独立判断是否满足退出条件（与决策请求分离）。"""
+    def verify(self, task_prompt: str, exit_condition: str, frame_bgr: np.ndarray,
+               scene: str = "task_verify") -> tuple[bool, str]:
+        """完成验证：用一张新鲜截图独立判断是否满足退出条件（与决策请求分离）。
+
+        scene：用量统计场景名，调用方（任务执行器 / 剧本终态验收）各自细分。
+        """
         prompt = (
             f"# 任务\n{task_prompt}\n\n# 完成判据\n{exit_condition}\n\n"
             "# 请仅根据当前画面判断任务是否已完成，只输出 JSON：\n"
@@ -215,6 +252,7 @@ class Brain:
         text = self._chat(
             [{"type": "text", "text": prompt}, self._image_part(frame_bgr)],
             system="你是游戏画面验收员，只依据画面可见证据判断，不做任何操作。",
+            scene=scene,
         )
         data = self._parse_json(text)
         return bool(data.get("verified")), str(data.get("reason", ""))
@@ -227,7 +265,7 @@ class Brain:
             "# 请输出更新后的知识卡：保留旧卡中仍有效的要点，补充本次新发现的路径要点/坑位"
             "（按钮位置描述、日文词、需要等待的动画等）。用简短条目列表，不超过 12 条，只输出列表本身。"
         )
-        return self._chat([{"type": "text", "text": prompt}]).strip()
+        return self._chat([{"type": "text", "text": prompt}], scene="knowledge_card").strip()
 
     def merge_supplement(self, task_name: str, task_prompt: str, supplement: str) -> str:
         """任务成功后把用户补充情报增量合入任务 prompt（改稿），返回新 prompt 全文。
@@ -244,8 +282,8 @@ class Brain:
             "- 保持原文结构与行文风格（步骤式描述、含弹窗与异常的处理、以回到主页/停留页收尾）；\n"
             "- 只改动与补充情报相关的部分，其余内容逐字保留；\n"
             "- 与补充情报冲突的旧机制描述要替换成新机制，不要新旧并存；\n"
-            "- 不添加原文和补充情报之外的猜测。"
-        )}]).strip()
+                "- 不添加原文和补充情报之外的猜测。"
+        )}], scene="prompt_merge").strip()
         if raw.startswith("```"):           # 个别模型爱加代码围栏
             raw = re.sub(r"^```[^\n]*\n?", "", raw)
             raw = re.sub(r"\n?```\s*$", "", raw).strip()
@@ -253,18 +291,21 @@ class Brain:
             raise BrainError(f"改稿结果过短（{len(raw)} 字符），疑似丢内容，放弃合入")
         return raw
 
-    def read_json_from_image(self, frame_bgr: np.ndarray, instruction: str) -> dict:
+    def read_json_from_image(self, frame_bgr: np.ndarray, instruction: str,
+                             scene: str = "vision_read") -> dict:
         """对（裁剪过的）局部截图做定向识读，返回模型给出的 JSON。
 
         用于确定性前置检查（如读挂机倒计时），prompt 必须要求只输出 JSON。
+        scene：用量统计场景名，调用方细分（前置检查 / 深渊定色）。
         """
         text = self._chat(
             [{"type": "text", "text": instruction}, self._image_part(frame_bgr)],
             system="你是画面识读助手，只输出一个 JSON 对象，禁止输出其他文字。",
+            scene=scene,
         )
         return self._parse_json(text)
 
-    def ask_json(self, instruction: str, text: str) -> dict:
+    def ask_json(self, instruction: str, text: str, scene: str = "misc") -> dict:
         """纯文本→JSON 问答（程序化逻辑失败时的 LLM 兜底决策用）。
 
         instruction 定角色与输出约束，text 是现场描述；要求两者都让模型只输出 JSON。
@@ -272,6 +313,7 @@ class Brain:
         resp = self._chat(
             [{"type": "text", "text": text}],
             system=instruction,
+            scene=scene,
         )
         return self._parse_json(resp)
 
@@ -300,6 +342,7 @@ class Brain:
             self._chat(
                 [{"type": "text", "text": prompt}],
                 system="你是自动化流程分析师，只输出一个 JSON 对象，禁止输出其他文字。",
+                scene="flow_compile",
             )
         )
         return {

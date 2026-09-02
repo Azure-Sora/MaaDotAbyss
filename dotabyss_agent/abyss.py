@@ -561,7 +561,7 @@ def _classify_codes_vision(device, options, brain, log=print) -> None:
                 crop,
                 "这是游戏深渊代码（buff）卡片的图标特写。大方块图标的边框/主色代表颜色种类："
                 "黄=impact、红=rush、蓝=safe、紫=risk。只输出 JSON："
-                '{"color": "impact|rush|safe|risk 之一"}')
+                '{"color": "impact|rush|safe|risk 之一"}', scene="abyss_code")
             color = str(data.get("color", "")).lower()
             if color in ("impact", "rush", "safe", "risk"):
                 o["color"] = color
@@ -1049,7 +1049,7 @@ def _llm_rescue(device, brain, situation: str, log=print) -> bool:
         "corner=点屏幕左上角跳过无按钮浮层。绝不选含 撤退/PullOut/Retreat 的按钮。"
     )
     try:
-        data = brain.ask_json("你是游戏自动化脚本的兜底决策器，只输出一个 JSON 对象。", prompt)
+        data = brain.ask_json("你是游戏自动化脚本的兜底决策器，只输出一个 JSON 对象。", prompt, scene="abyss_rescue")
     except Exception as e:
         log(f"  [兜底] 模型调用失败: {e.__class__.__name__}")
         return False

@@ -43,6 +43,7 @@
 - 🌉 **双设备后端** —— 游戏装了 BepInEx 就用桥插件：进程内直调 UI、窗口可遮挡不抢焦点、截图更快；没装则自动回退 MAA 前台模式
 - 🔌 **任意 OpenAI 兼容模型** —— GUI 里填 base_url + key 即用，模型名手动填或从 `/models` 自动发现；GLM、DeepSeek、本地 vLLM 随意切换（注意一定要支持多模态！！！）
 - 🛰️ **控制面** —— GUI 内嵌本地 HTTP 接口，CLI 可附着同一引擎：`status` / `run` / `stop` / `screenshot`，方便脚本联动
+- 📊 **大模型用量统计** —— 每次模型调用的输入/输出/缓存命中/推理 token 自动落盘（`.local/usage/`），GUI「用量」页按场景/模型/任务/时间多维度出图，CLI `ctl usage` 同样可查
 
 ## 📖 使用须知
 

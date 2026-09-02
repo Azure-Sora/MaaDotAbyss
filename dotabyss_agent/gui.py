@@ -59,6 +59,7 @@ from .control import CtlError, ControlServer, SHOTS_DIR, save_frame
 from .device import DeviceError
 from .runner import load_tasks, run_selected
 from .taskfile import TaskFileError, delete_task, reorder_tasks, update_task
+from .usage_page import UsagePage
 
 PREVIEW_W, PREVIEW_H = 512, 288   # 1280x720 缩放
 THUMB_W, THUMB_H = 160, 90        # 时间线缩略图
@@ -955,6 +956,7 @@ class AbyssPage(QWidget):
                 quota=quota, target_floor=target)
             self._led = led
             brain = Brain(provider=provider)   # 未知名代码 → 视觉定色入册
+            brain.task_ctx = "abyss"
             r = run_to_floor(device, led, brain=brain, max_rooms=max_rooms, log=log)
             log(f"===== 深渊结束: {json.dumps(r, ensure_ascii=False)}")
             s.result.emit({"type": "result", "task": "abyss", "status": r.get("status", "?")})
@@ -1648,7 +1650,7 @@ class GuiCtlAdapter:
         return {
             "status": self.status, "tasks": self.tasks_list, "run": self.run,
             "stop": self.stop, "screenshot": self.screenshot,
-            "logs": self.logs, "quit": self.quit,
+            "logs": self.logs, "usage": self.usage_stats, "quit": self.quit,
         }
 
     # ---- 命令（HTTP 线程） ----
@@ -1721,6 +1723,14 @@ class GuiCtlAdapter:
             lines = list(self._logs)
         return {"lines": lines[-max(1, int(params.get("tail", 50))):]}
 
+    def usage_stats(self, params: dict) -> dict:
+        """LLM 用量聚合（不碰 Qt，HTTP 线程直接算）。days<=0 表示全部。"""
+        from . import usage
+        days = params.get("days", 30)
+        if days is not None:
+            days = int(days) if int(days) > 0 else None
+        return usage.aggregate(days)
+
     def quit(self, params: dict) -> dict:
         # 延迟关窗：让本请求的响应先发回客户端
         call_in_gui(self.state, lambda: QTimer.singleShot(100, self.window.close))
@@ -1747,11 +1757,13 @@ class MainWindow(FluentWindow):
         self.abyss = AbyssPage(self.state)
         self.teach = TeachPage(self.state, self.tasks)
         self.models = ModelPage(self.state)
+        self.usage = UsagePage()
 
         self.addSubInterface(self.tasks, FIF.PLAY, "任务")
         self.addSubInterface(self.abyss, FIF.GLOBE, "深渊")
         self.addSubInterface(self.monitor, FIF.CAMERA, "监控")
         self.addSubInterface(self.teach, FIF.ADD, "新建任务")
+        self.addSubInterface(self.usage, FIF.HISTORY, "用量")
         self.addSubInterface(self.models, FIF.ROBOT, "模型")
 
         # 模型页变更 → 任务/深渊/教学三页下拉联动

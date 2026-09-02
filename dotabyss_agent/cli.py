@@ -166,6 +166,8 @@ def _ctl(args) -> int:
             params["out"] = args.out
         elif args.action == "logs":
             params["tail"] = args.tail
+        elif args.action == "usage" and args.days is not None:
+            params["days"] = args.days
 
     ok, data = control.ctl_request(args.action, params)
     if not ok and isinstance(data, dict) and str(data.get("error", "")).startswith("no-engine"):
@@ -208,7 +210,8 @@ def main():
     p_teach.add_argument("--provider", type=str, default=None, help="覆盖默认模型供给 (mimo/glm)")
     p_ctl = sub.add_parser("ctl", help="附着到运行中的 GUI 引擎（docs/research/13）")
     p_ctl.add_argument("action",
-                       choices=["status", "tasks", "run", "stop", "screenshot", "logs", "quit"])
+                       choices=["status", "tasks", "run", "stop", "screenshot", "logs",
+                                "usage", "quit"])
     p_ctl.add_argument("task_ids", nargs="*", default=[])
     p_ctl.add_argument("--all", action="store_true")
     p_ctl.add_argument("--max-steps", type=int, default=30)
@@ -217,6 +220,7 @@ def main():
     p_ctl.add_argument("--no-knowledge-update", action="store_true")
     p_ctl.add_argument("--out", type=str, default="", help="screenshot 保存路径")
     p_ctl.add_argument("--tail", type=int, default=50, help="logs 尾部行数")
+    p_ctl.add_argument("--days", type=int, default=None, help="usage 统计近 N 天（默认 30，0=全部）")
     args = ap.parse_args()
 
     if args.cmd == "list":

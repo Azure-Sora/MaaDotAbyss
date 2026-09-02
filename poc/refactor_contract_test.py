@@ -32,7 +32,7 @@ class VerifyBrain:
     def __init__(self):
         self.verify_calls = 0
 
-    def verify(self, *_args):
+    def verify(self, *_args, **_kwargs):    # **kwargs：runner 现带 scene 细分参数
         self.verify_calls += 1
         return True, "verified"
 

@@ -47,6 +47,7 @@ def run_teach_session(
 
     status: distilled（完成并入库）/ aborted（中止，仅存档）/ blocked
     """
+    brain.task_ctx = task_id          # 用量统计归属
     run_dir = RUNS_DIR / datetime.now().strftime("%Y%m%d_%H%M%S") / f"teach_{task_id}"
     run_dir.mkdir(parents=True, exist_ok=True)
     dialogue: list[dict] = []      # {"step","role","text"}

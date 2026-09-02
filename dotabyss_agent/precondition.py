@@ -32,7 +32,7 @@ def check_precondition(task: dict, device: GameDevice, brain: Brain) -> tuple[bo
         crop = frame[y0:y1, x0:x1]
         if crop.size == 0:
             return False, "裁剪区域无效，保守执行"
-        data = brain.read_json_from_image(crop, IDLE_TIMER_PROMPT)
+        data = brain.read_json_from_image(crop, IDLE_TIMER_PROMPT, scene="precondition")
         hours = data.get("hours_remaining")
         if hours is None:
             return False, f"未读到倒计时（raw={data.get('raw')!r}），保守执行"

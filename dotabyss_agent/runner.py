@@ -233,7 +233,7 @@ def _run_flow_stage(task: dict, context: RunnerContext) -> StageOutcome:
             frame = context.device.screenshot()
             safe_callback(context.frame_cb, frame, log=context.log, label="frame")
             ok, reason = context.brain.verify(
-                task["prompt"], task.get("exit_condition", ""), frame
+                task["prompt"], task.get("exit_condition", ""), frame, scene="flow_verify"
             )
         except Exception as exc:
             result = ExecutionResult(
