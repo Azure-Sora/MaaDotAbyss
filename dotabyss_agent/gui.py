@@ -771,7 +771,7 @@ LEDGER_ZH = (("floor", "层数"), ("erosion", "侵蚀"), ("keys", "钥匙"), ("c
 
 
 class AbyssPage(QWidget):
-    """自动深渊：入场 → 监督式推进（选房/拿码/事件）→ 到层结算。
+    """自动深渊：入场 → 监督式推进（选房/拿码/事件）→ 到层结算或停机接管。
 
     封装 abyss.enter_run + run_to_floor（poc/abyss_run 同款实测流程）；
     账本经 ledger 信号实时上屏；log 回调兼任停止检查点与画面抽帧。
@@ -822,6 +822,11 @@ class AbyssPage(QWidget):
                          ("房间上限", self.max_rooms)):
             row1.addWidget(BodyLabel(label))
             row1.addWidget(w)
+        self.settle_mode = ComboBox()
+        self.settle_mode.addItems(["归还结算", "停下接管"])
+        self.settle_mode.setToolTip("到达目标层后的续行界面：直接帰還结算，或停在原地等人工接管")
+        row1.addWidget(BodyLabel("到层后"))
+        row1.addWidget(self.settle_mode)
         row1.addStretch(1)
         gv.addLayout(row1)
         row2 = QHBoxLayout()
@@ -895,6 +900,7 @@ class AbyssPage(QWidget):
             "target": self.target.value(),
             "start_floor": self.start_floor.value(),
             "max_rooms": self.max_rooms.value(),
+            "settle_mode": self.settle_mode.currentIndex(),
             "quota": {c: sp.value() for c, sp in self.quota_spins.items()},
         }
         try:
@@ -912,6 +918,9 @@ class AbyssPage(QWidget):
             v = data.get(key)
             if isinstance(v, (int, float)):
                 w.setValue(int(v))       # 超范围时 Qt 自动钳回合法区间
+        sm = data.get("settle_mode")
+        if isinstance(sm, int) and 0 <= sm < self.settle_mode.count():
+            self.settle_mode.setCurrentIndex(sm)
         quota = data.get("quota")
         if isinstance(quota, dict):
             for c, sp in self.quota_spins.items():
@@ -948,7 +957,8 @@ class AbyssPage(QWidget):
         self._last_shot = 0.0
         for val in self.ledger_vals.values():
             val.setText("-")
-        args = (target, start_floor, quota, self.provider.currentText(), self.max_rooms.value())
+        args = (target, start_floor, quota, self.provider.currentText(), self.max_rooms.value(),
+                "takeover" if self.settle_mode.currentIndex() == 1 else "settle")
         self._save_params()     # 启动即记住本次填法，下次打开自动恢复
         self.state.worker = threading.Thread(target=self._work, args=args, daemon=True)
         self.state.worker.start()
@@ -958,7 +968,7 @@ class AbyssPage(QWidget):
         self.state.stop_event.set()
         self.status_label.setText("停止中（下一个日志点生效；战斗等待中需等本场结束）…")
 
-    def _work(self, target, start_floor, quota, provider, max_rooms):
+    def _work(self, target, start_floor, quota, provider, max_rooms, settle_mode="settle"):
         s = self.state.sig
         stop = self.state.stop_event
 
@@ -991,7 +1001,8 @@ class AbyssPage(QWidget):
             self._led = led
             brain = Brain(provider=provider)   # 未知名代码 → 视觉定色入册
             brain.task_ctx = "abyss"
-            r = run_to_floor(device, led, brain=brain, max_rooms=max_rooms, log=log)
+            r = run_to_floor(device, led, brain=brain, max_rooms=max_rooms, log=log,
+                             settle_mode=settle_mode)
             log(f"===== 深渊结束: {json.dumps(r, ensure_ascii=False)}")
             s.result.emit({"type": "result", "task": "abyss", "status": r.get("status", "?")})
         except StopRequested:
@@ -1019,6 +1030,7 @@ class AbyssPage(QWidget):
         status = r.get("status")
         tip = {
             "settled": ("深渊完成", "已到目标层并结算", InfoBar.success, 5000),
+            "takeover": ("深渊到层", "已到目标层，停在续行界面等人工接管", InfoBar.warning, -1),
             "rooms_exhausted": ("房间上限", "已推进到房间上限但未到结算点", InfoBar.warning, 5000),
             "no_candidates": ("深渊受阻", "地图上没有候选房间，请人工看一眼", InfoBar.error, -1),
             "stopped": ("深渊已停止", "进度保留，可从检查点继续", InfoBar.warning, 5000),

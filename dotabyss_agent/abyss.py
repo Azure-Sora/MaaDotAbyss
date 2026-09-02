@@ -19,6 +19,18 @@
 2026-09-02 新增：代码弹窗退场核验（_close_out_popup）——弹窗确认后偶发关闭动画
 冻结成僵尸（不可见+確認/キャンセル/左上角全关不掉+全屏卡片锁输入，唯一解法重启
 游戏），点完必须等它真消失，射线补点仍不退就报错停机；左上角跳过前留生成窗复查。
+
+2026-09-03 新增：浮层先点自带关闭按钮再左上角（_overlay_close_btn）——拿码获得
+弹窗 Popup_FullScreen_AbyssCodeReceived 的关按钮不在 (0,0) 射线上，左上角跳过两连
+未命中静默返回，结算流空转 120s 超时；LLM 兜底点它自带关成功后，报酬页还要 次へ
+才回图，单一动作兜底验证不过把进展白扔——兜底改多轮接力（有进展继续、没进展止损）。
+
+2026-09-03 新增：代码主图标模板定色（_match_code_color）——同色系主图标完全相同
+（图鉴四系实測），图鉴每系取一纯净竖条做模板，多尺度匹配即定色，LLM 只兜底匹配
+不中的；「获得代码」页=一切入码路径的统一关口（_ack_received_page，弹窗拿码经
+grant_ack_pending 去重，其余来源在此补计）；结算评价屏 CodeArea 各色代码数对账
+（reconcile_code_counts）兜底回填一切漏计；run_to_floor 支持 settle_mode=takeover
+（到层不帰還，停在续行界面等人工接管）。
 """
 import json
 import re
@@ -335,11 +347,26 @@ def _overlay_popup_open(tree) -> bool:
     return False
 
 
-def _find_overlay_close(tree) -> str | None:
-    """覆盖层关闭按钮的完整路径（interactable 的 Button_Close/Popup_Close）。"""
+def _overlay_close_btn(tree) -> str | None:
+    """覆盖层自带关闭按钮的完整路径：shim 记忆优先，其次弹窗层级内名字含 Close 的
+    interactable 按钮（Button_Close/Popup_Close/FullScreenCloseButton——拿码获得
+    弹窗 Popup_FullScreen_AbyssCodeReceived 的关就是后者，2026-09-03 实战 LLM 兜底
+    点它成功）。只认路径带 Popup 的：底下结算页的同名按钮 Invoke 会穿透（§14.4），
+    全树裸找不安全。"""
+    key = None
     for n in _walk_all(tree):
         b = n.get("button")
-        if b and b.get("interactable") and n["name"] in ("Button_Close", "Popup_Close"):
+        if b and "/Popup_" in b.get("path", ""):
+            key = b["path"].split("/Popup_")[1].split("/")[0]
+            break
+    if key:
+        shim = _load_shims().get(key)
+        if shim:
+            return shim
+    for n in _walk_all(tree):
+        b = n.get("button")
+        if b and b.get("interactable") and "close" in n["name"].lower() \
+                and ("Popup" in b.get("path", "") or "FullScreen" in n["name"]):
             return b["path"]
     return None
 
@@ -366,23 +393,9 @@ def _save_shim(key: str, path: str) -> None:
 
 
 def _close_overlay(device, log=print) -> None:
-    """关闭当前覆盖层弹窗（商店/宝箱等）：shim 记忆 → 树内关闭按钮 → 左上角。
+    """关闭当前覆盖层弹窗（商店/宝箱等）：浮层自带关闭按钮（shim 记忆优先）→ 左上角。
     关闭按钮从树里拿完整路径再点（覆盖层开着时底下地图按钮全变灰，路径重试必失败）。"""
-    tree = device.ui_tree(max_nodes=30000)
-    for n in _walk_all(tree):
-        b = n.get("button")
-        if b and "PopupService" in b.get("path", "") and "Popup_" in b.get("path", ""):
-            key = n["name"].split("/")[0]
-            shim = _load_shims().get(key)
-            if shim:
-                try:
-                    device.click_by_path(shim)
-                    log(f"  [shim] {key} → {shim[-50:]}")
-                    return
-                except Exception:
-                    pass
-            break
-    path = _find_overlay_close(tree)
+    path = _overlay_close_btn(device.ui_tree(max_nodes=30000))
     if path:
         device.click_by_path(path)
         log(f"  关闭覆盖层 → {path[-50:]}")
@@ -416,7 +429,49 @@ def _skip_overlay_by_corner(device, log=print) -> bool:
         if not wait_transition_done(device):
             raise RuntimeError("跳过转场疑似卡死（LOADING 不退）——停止点击等待人工")
         return True
+    log("  左上角 (0,0) 两次尝试均未命中可点击层（浮层多半自带关闭按钮，下轮改点它）")
     return False
+
+
+def _ack_received_page(device, led: AbyssLedger, brain, log=print, tree: dict | None = None) -> None:
+    """「アビスコードを獲得しました」获得页=所有入码路径的统一关口（2026-09-03）：
+    弹窗拿码已在 _handle_code_popup 计数（grant_ack_pending 标记本页只是其退场确认，
+    消费标记不重复计数）；其余来源（直得/奖励/首通等，正是账本漏计的盲区）在此认领——
+    主图标模板定色入账，不中再 LLM 视觉，仍认不出就记日志放弃（宁可漏计不瞎计，
+    结算屏 CodeArea 对账会兜底回填）。非获得页零开销返回。"""
+    tree = tree or device.ui_tree(max_nodes=30000)
+    texts = [n.get("text") or "" for n in _walk_all(tree)]
+    if not any("アビスコードを獲得" in t for t in texts):
+        return
+    if getattr(led, "grant_ack_pending", False):
+        led.grant_ack_pending = False
+        log("  拿码确认页（弹窗拿码退场确认，已计）")
+        return
+    color = None
+    frame = device.screenshot()
+    h, w = frame.shape[:2]
+    m = _match_code_color(frame, (int(w * 0.2), int(h * 0.08), int(w * 0.8), int(h * 0.85)))
+    if m:
+        color, score = m
+        log(f"  获得代码入账: {color}（模板 {score:.2f}）")
+    elif brain is not None:
+        crop = frame[int(h * 0.1):int(h * 0.8), int(w * 0.2):int(w * 0.8)]
+        try:
+            data = brain.read_json_from_image(
+                crop,
+                "这是游戏获得深渊代码的确认页特写。代码图标的主色代表颜色种类："
+                "黄=impact、红=rush、蓝=safe、紫=risk。只输出 JSON："
+                '{"color": "impact|rush|safe|risk 之一"}', scene="abyss_code")
+            c = str(data.get("color", "")).lower()
+            if c in ("impact", "rush", "safe", "risk"):
+                color = c
+                log(f"  获得代码入账: {color}（LLM 视觉）")
+        except Exception as e:
+            log(f"  获得页视觉定色失败: {e.__class__.__name__}")
+    if color:
+        led.buffs[color] = led.buffs.get(color, 0) + 1
+    else:
+        log("  获得代码页定色失败——暂不入账，待结算屏代码数对账回填")
 
 
 def _result_step(device, led: AbyssLedger, brain, log=print, tree: dict | None = None) -> bool:
@@ -436,6 +491,20 @@ def _result_step(device, led: AbyssLedger, brain, log=print, tree: dict | None =
     #    下层页面而浮层卡死（2026-09-01 实战；此前 12000 截断时代 Button_Next 恰好
     #    不可见，歪打正着走左上角）
     if _overlay_present(tree):
+        _ack_received_page(device, led, brain, log=log, tree=tree)
+        close = _overlay_close_btn(tree)
+        if close:
+            # 关闭瞬间可能是下一个代码弹窗的挂出时刻（僵尸弹窗诱因），留生成窗复查
+            time.sleep(1.2)
+            if _code_popup_on_screen(device):
+                log("  关闭浮层前发现代码弹窗挂出，改为先处理弹窗")
+                return False
+            device.click_by_path(close)
+            log(f"  关闭浮层 → {close[-50:]}")
+            from .macros import wait_transition_done
+            if not wait_transition_done(device):
+                raise RuntimeError("浮层关闭转场疑似卡死（LOADING 不退）——停止点击等待人工")
+            return True
         return _skip_overlay_by_corner(device, log=log)
     # 3) 结算按钮（真实 Button）
     for c0 in tree["canvases"]:
@@ -529,6 +598,7 @@ def _handle_code_popup(device, led: AbyssLedger, brain, log=print) -> None:
     device.click_by_path(_popup_btn(popup, "Button_Confirm"))
     color = o["color"] or "unknown"
     led.buffs[color] = led.buffs.get(color, 0) + 1   # buffs 懒初始化：in 判断会漏掉首码
+    led.grant_ack_pending = True   # 拿码确认页即将挂出，届时只确认不重复计数
     log(f"  拿码 {o['name']}（{color}，战力 {o['power']}）")
     _close_out_popup(device, popup, log=log)   # 拿码不算数，弹窗退场才算数
 
@@ -545,11 +615,31 @@ def _popup_btn(popup, suffix: str) -> str:
 
 
 def _classify_codes_vision(device, options, brain, log=print) -> None:
-    """未知名代码：裁大方块图标 → LLM 定色 → 入注册表。"""
+    """未知名代码定色：主图标模板匹配（快、零 token）→ 不中的才 LLM 视觉兜底。
+    同色系主图标完全相同（图鉴四系实測，docs/12 §14.11），只有右下菱形（效果）与
+    边框（稀有度）因码而异——图鉴每系取一纯净竖条做模板即可代表全系。"""
     if not options:
         return
     frame = device.screenshot()
+    rest = []
     for o in options:
+        if not o.get("screen"):
+            continue
+        x0, y0, x1, y1 = o["screen"]
+        w, h = x1 - x0, y1 - y0
+        m = _match_code_color(frame, (x0 + int(w * 0.03), y0 + int(h * 0.03),
+                                      x1 - int(w * 0.03), y0 + int(h * 0.7)))
+        if m:
+            color, score = m
+            o["color"] = color
+            if o["name"]:
+                CODE_COLORS[o["name"]] = color
+            log(f"  模板定色: {o['name']} → {color}（{score:.2f}）")
+        else:
+            rest.append(o)
+    if not rest:
+        return
+    for o in rest:
         if not o.get("screen"):
             continue
         x0, y0, x1, y1 = o["screen"]
@@ -570,6 +660,51 @@ def _classify_codes_vision(device, options, brain, log=print) -> None:
                 log(f"  视觉定色: {o['name']} → {color}（已入注册表）")
         except Exception as e:
             log(f"  视觉定色失败 {o['name']}: {e.__class__.__name__}")
+
+
+# 主图标模板定色：tasks/flows/anchors/abyss/code_icons/<色系>.png（图鉴收集脚本沉淀）。
+CODE_ICON_DIR = ABYSS_ANCHORS / "code_icons"
+MATCH_SCALE_MIN, MATCH_SCALE_MAX, MATCH_SCALE_STEP = 0.8, 2.1, 0.1
+CODE_MATCH_THRESHOLD = 0.75   # 实测同系 0.90+、异系 ≤0.42（含跨渲染尺度）
+_TPL_CACHE: dict[str, "np.ndarray"] = {}
+
+
+def _code_templates() -> dict:
+    if not _TPL_CACHE:
+        for p in CODE_ICON_DIR.glob("*.png"):
+            img = cv2.imread(str(p), cv2.IMREAD_GRAYSCALE)
+            if img is not None:
+                _TPL_CACHE[p.stem] = img
+    return _TPL_CACHE
+
+
+def _match_code_color(frame, region) -> tuple[str, float] | None:
+    """区域内多尺度模板匹配主图标 → (色系, 得分)；低于阈值返回 None。
+    frame=BGR 截图，region=(x0,y0,x1,y1)。模板是图标左部的纯净竖条（无菱形无框），
+    在卡片区域内搜它，几何/渲染尺度差异由多尺度吸收（弹窗/图鉴/获得页通用）。"""
+    tps = _code_templates()
+    if not tps:
+        return None
+    x0, y0, x1, y1 = region
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)[max(0, int(y0)):int(y1),
+                                                   max(0, int(x0)):int(x1)]
+    if gray.shape[0] < 30 or gray.shape[1] < 30:
+        return None
+    best_color, best_score = None, -1.0
+    for color, tpl in tps.items():
+        th, tw = tpl.shape
+        s = MATCH_SCALE_MIN
+        while s <= MATCH_SCALE_MAX + 1e-9:
+            t = cv2.resize(tpl, (max(2, int(tw * s)), max(2, int(th * s))))
+            if t.shape[0] < gray.shape[0] and t.shape[1] < gray.shape[1]:
+                res = cv2.matchTemplate(gray, t, cv2.TM_CCOEFF_NORMED)
+                score = float(res.max())
+                if score > best_score:
+                    best_color, best_score = color, score
+            s += MATCH_SCALE_STEP
+    if best_color is not None and best_score >= CODE_MATCH_THRESHOLD:
+        return best_color, best_score
+    return None
 
 
 def _walk_all(tree):
@@ -788,7 +923,7 @@ def _close_shop(device, log=print) -> None:
 def _open_treasure(device, log=print) -> None:
     """宝箱房（收益垃圾）：先试 X 不开离开；被迫开则选 浸食+40（绝不 HP/钥匙）。"""
     tree = device.ui_tree(max_nodes=30000)
-    if _find_overlay_close(tree):
+    if _overlay_close_btn(tree):
         _close_overlay(device, log=log)
         log("  宝箱 X 离开")
         return
@@ -888,6 +1023,57 @@ def reconcile(device, led: AbyssLedger, log=print) -> dict:
     if diff:
         log(f"  [对账] HUD 回填: {diff}")
     return diff
+
+
+# 结算评价页 Contents2/CodeList/CodeArea：各色代码数（H5/Value，游戏真值）。
+_CODE_COUNT_NODES = {"ImpactCode": "impact", "RushCode": "rush",
+                     "ReduceCode": "safe", "IncreaseCode": "risk"}
+
+
+def read_code_counts(tree) -> dict:
+    """结算评价页的各色持码数 {色系: 数量}。页面不在场/数值未挂出返回 {}。
+    只认 H5 小节下的 Value——RushCode 子树里的 gauge Value（恩恵ゲージ点数）不混入。"""
+    out: dict = {}
+    def walk(n):
+        yield n
+        for c in n.get("children", []):
+            yield from walk(c)
+    for n in _walk_all(tree):
+        color = _CODE_COUNT_NODES.get(n["name"])
+        if not color or color in out:
+            continue
+        for x in walk(n):
+            if x["name"] == "H5":
+                for v in walk(x):
+                    if v["name"] == "Value" and v.get("text"):
+                        t = str(v["text"]).strip().replace(",", "")
+                        if t.isdigit():
+                            out[color] = int(t)
+                        break
+                break
+    return out
+
+
+def reconcile_code_counts(device, led: AbyssLedger, log=print,
+                          timeout: float = 20.0) -> None:
+    """结算屏各色代码数对账（游戏真值回填，只增不减）：中途一切漏计入账的路径
+    （直得/奖励等）在此统一补齐。评价页未出现（超时）则静默跳过。"""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        counts = read_code_counts(device.ui_tree(max_nodes=30000))
+        if counts:
+            diff = {}
+            for c, v in counts.items():
+                old = led.buffs.get(c, 0)
+                if v > old:
+                    diff[c] = (old, v)
+                    led.buffs[c] = v
+            if diff:
+                log(f"  [对账] 代码数回填: {diff}（有漏计入码，已按游戏真值补齐）")
+            else:
+                log(f"  [对账] 代码数与游戏一致: {counts}")
+            return
+        time.sleep(2.0)
 
 
 def _wait_map_stable(device, led: AbyssLedger | None = None, brain=None, log=print) -> None:
@@ -1025,67 +1211,85 @@ def _party_confirm_challenge(device, log=print, tries: int = 6) -> bool:
     raise RuntimeError("編成確認弹窗可见但始终没等到 挑む 按钮")
 
 
-def _llm_rescue(device, brain, situation: str, log=print) -> bool:
+def _llm_rescue(device, brain, situation: str, log=print, max_rounds: int = 4) -> bool:
     """房间处理失败时的 LLM 兜底：按钮表交模型拍板一个动作，执行并验证回到干净地图。
 
-    「失败叫模型、成功沉淀」闭环：解法写入 .local/abyss_shims.json（覆盖层名→关闭按钮
-    路径），下次同类卡点 _close_overlay 直接重放——自动修复以参数级沉淀实现，不自动改
-    .py 代码（不可审不可回滚）。brain=None 时跳过。"""
+    多轮接力（2026-09-03 实战）：一步往往到不了地图——拿码获得弹窗
+    Popup_FullScreen_AbyssCodeReceived 关掉后还停在探索報酬页，得再点 次へ 才回图。
+    上轮执行后未回图但画面确有进展（场景/按钮表变了）→ 继续下一轮；画面纹丝不动
+    =点不动，止损。单一动作版会在这里把「已关掉浮窗」的进展整轮白扔。
+
+    「失败叫模型、成功沉淀」闭环：解法写入 .local/abyss_shims.json（覆盖层名→关闭
+    按钮路径），下次 _close_overlay/_result_step 直接重放——自动修复以参数级沉淀
+    实现，不自动改 .py 代码（不可审不可回滚）。brain=None 时跳过。"""
     if brain is None:
         return False
     from .macros import observe_buttons, wait_transition_done
-    try:
-        scene, rows, total = observe_buttons(device, max_rows=30)
-    except Exception as e:
-        log(f"  [兜底] 读按钮表失败: {e.__class__.__name__}")
-        return False
-    if total > len(rows):
-        rows = rows + [f"(其余 {total - len(rows)} 条略，多为地图房间/道路)"]
-    prompt = (
-        f"深渊自动化在步骤「{situation}」后卡住，当前场景 {scene}。\n"
-        "可点击按钮（✓可点/✗灰，格式 路径｜可见文本）：\n" + "\n".join(rows) +
-        "\n目标：关掉当前覆盖层/界面，回到深渊地图。只输出 JSON："
-        '{"analysis":"一句话判断","action":"click_path|corner","path":"要点的完整按钮路径,corner 时省略"}\n'
-        "corner=点屏幕左上角跳过无按钮浮层。绝不选含 撤退/PullOut/Retreat 的按钮。"
-    )
-    try:
-        data = brain.ask_json("你是游戏自动化脚本的兜底决策器，只输出一个 JSON 对象。", prompt, scene="abyss_rescue")
-    except Exception as e:
-        log(f"  [兜底] 模型调用失败: {e.__class__.__name__}")
-        return False
-    action = str(data.get("action", ""))
-    path = str(data.get("path", ""))
-    log(f"  [兜底] 模型: {str(data.get('analysis', '?'))[:60]} → {action}")
-    try:
-        if action == "click_path":
-            if any(k in path for k in ("PullOut", "Retreat")):
-                raise RuntimeError(f"模型选了禁区按钮 {path}")
-            device.click_by_path(path)
-        elif action == "corner":
-            if not _skip_overlay_by_corner(device, log=log):
-                return False
-        else:
+    popup_click = None        # 序列里第一个 Popup_ 关闭点击（成功后沉淀为 shim）
+    prev_sig: tuple | None = None
+    for round_no in range(1, max_rounds + 1):
+        try:
+            scene, rows, total = observe_buttons(device, max_rows=30)
+        except Exception as e:
+            log(f"  [兜底] 读按钮表失败: {e.__class__.__name__}")
             return False
-    except Exception as e:
-        log(f"  [兜底] 执行失败: {e}")
-        return False
-    time.sleep(1.5)
-    wait_transition_done(device)
-    tree = device.ui_tree(max_nodes=30000)
-    ok = (tree.get("scene") == "Nether" and not _overlay_popup_open(tree)
-          and not _overlay_present(tree) and not _code_popup_present(tree))
-    if not ok:
-        log("  [兜底] 执行后未回到干净地图")
-        return False
-    if action == "click_path" and "Popup_" in path:
-        _save_shim(path.split("/Popup_")[1].split("/")[0], path)   # 沉淀解法供重放
-    log("  [兜底] 已回到干净地图（解法已沉淀）")
-    return True
+        sig = (scene, tuple(rows))
+        if sig == prev_sig:
+            log(f"  [兜底] 第{round_no}轮画面与上轮相同（点不动）——止损")
+            return False
+        prev_sig = sig
+        if total > len(rows):
+            rows = rows + [f"(其余 {total - len(rows)} 条略，多为地图房间/道路)"]
+        tail = f"（第{round_no}轮，上一步已执行但还没回图，继续朝目标推进）" if round_no > 1 else ""
+        prompt = (
+            f"深渊自动化在步骤「{situation}」后卡住，当前场景 {scene}{tail}。\n"
+            "可点击按钮（✓可点/✗灰，格式 路径｜可见文本）：\n" + "\n".join(rows) +
+            "\n目标：关掉当前覆盖层/界面，回到深渊地图。只输出 JSON："
+            '{"analysis":"一句话判断","action":"click_path|corner","path":"要点的完整按钮路径,corner 时省略"}\n'
+            "corner=点屏幕左上角跳过无按钮浮层。绝不选含 撤退/PullOut/Retreat 的按钮。"
+        )
+        try:
+            data = brain.ask_json("你是游戏自动化脚本的兜底决策器，只输出一个 JSON 对象。", prompt, scene="abyss_rescue")
+        except Exception as e:
+            log(f"  [兜底] 模型调用失败: {e.__class__.__name__}")
+            return False
+        action = str(data.get("action", ""))
+        path = str(data.get("path", ""))
+        log(f"  [兜底] 第{round_no}轮: {str(data.get('analysis', '?'))[:60]} → {action}")
+        try:
+            if action == "click_path":
+                if any(k in path for k in ("PullOut", "Retreat")):
+                    raise RuntimeError(f"模型选了禁区按钮 {path}")
+                device.click_by_path(path)
+                if "Popup_" in path and popup_click is None:
+                    popup_click = path
+            elif action == "corner":
+                if not _skip_overlay_by_corner(device, log=log):
+                    return False
+            else:
+                return False
+        except Exception as e:
+            log(f"  [兜底] 执行失败: {e}")
+            return False
+        time.sleep(1.5)
+        wait_transition_done(device)
+        tree = device.ui_tree(max_nodes=30000)
+        ok = (tree.get("scene") == "Nether" and not _overlay_popup_open(tree)
+              and not _overlay_present(tree) and not _code_popup_present(tree))
+        if ok:
+            if popup_click:
+                _save_shim(popup_click.split("/Popup_")[1].split("/")[0], popup_click)   # 沉淀解法供重放
+            extra = "，解法已沉淀" if popup_click else ""
+            log(f"  [兜底] 已回到干净地图（{round_no} 轮接力{extra}）")
+            return True
+        log(f"  [兜底] 第{round_no}轮执行后未回到干净地图")
+    return False
 
 
 def run_to_floor(device, led: AbyssLedger, brain=None, log=print,
-                 max_rooms: int = 6) -> dict:
-    """监督式主循环：推进房间直到 max_rooms 或到达 target_floor 的续行点结算。"""
+                 max_rooms: int = 6, settle_mode: str = "settle") -> dict:
+    """监督式主循环：推进房间直到 max_rooms 或到达 target_floor 的续行点结算。
+    settle_mode="takeover" 时到层不帰還，停在续行界面等人工接管（status=takeover）。"""
     from .abyss_ui import read_candidates
     rooms = 0
     while rooms < max_rooms:
@@ -1094,9 +1298,13 @@ def run_to_floor(device, led: AbyssLedger, brain=None, log=print,
         tree = device.ui_tree(max_nodes=30000)
         if _gate_present(tree):
             settle = led.floor >= led.target_floor
+            if settle and settle_mode == "takeover":
+                log(f"  续行界面：已到目标层 {led.floor}F——按设定停在续行界面，等人工接管")
+                return {"status": "takeover", "floor": led.floor, "rooms": rooms}
             log(f"  续行界面：{'帰還结算' if settle else '买票续行'}")
             boss_floor_continue(device, led, settle=settle, log=log)
             if settle:
+                reconcile_code_counts(device, led, log=log)   # 结算屏各色代码数对账
                 return {"status": "settled", "floor": led.floor, "rooms": rooms}
             time.sleep(2.0)
             continue

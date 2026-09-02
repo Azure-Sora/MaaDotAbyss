@@ -45,6 +45,7 @@ class AbyssLedger:
     hp_lost_pct: int = 0        # 自上次战斗累计事件扣血（百分比点数）
     hp_budget_pct: int = 30     # 两场战斗之间允许的累计扣血
     erosion_safe: int = 80      # 侵蚀安全线（到线回复房价值飙升）
+    grant_ack_pending: bool = False  # 弹窗拿码后待获得页消费（防重复计数，非规划态）
 
     def total_codes(self) -> int:
         return sum(self.buffs.values())
