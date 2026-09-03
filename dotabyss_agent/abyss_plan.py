@@ -237,6 +237,50 @@ def pick_event(options: list[dict], led: AbyssLedger) -> int:
                               cost(options[i])))
 
 
+# ---- 宝箱三选一 ---------------------------------------------------------------
+
+def pick_treasure(options: list[dict], led: AbyssLedger) -> int:
+    """宝箱开箱方式三选一（消耗钥匙-1 / HP-40% / 浸食+40）——必答题。
+    2026-09-03 实测改约：X 离开=弹窗关而房不完成，Front 层候选全锁且弹窗不重弹
+    （候选 0 卡死），唯一出路是选卡+確定。
+
+    options: [{"kind": "key"|"hp"|"erosion", "key_cost"/"hp_cost"/"erosion_cost":
+               int, "interactable": bool}]，返回选项下标。
+    奖励是垃圾（选房权重垫底），本决策纯止损——挑伤最轻的出门方式：
+    1. HP 且战后缓冲够（hp_lost_pct+cost ≤ 60，进下一战 ≥40% 血）——战斗回满，
+       HP 是可再生成本，永久性代价（侵蚀/钥匙）能省则省；
+    2. 侵蚀投影 < 安全线（与事件同规则：绝不主动吃侵蚀贴线）；
+    3. 侵蚀投影 < 100（越线但未暴毙——到线回复房价值飙升，有兜底）；
+    4. 钥匙：只当侵蚀再吃即死时才烧——续行票烧一张=下个 boss 门提前结算，
+       保住已有收益，好过战斗暴毙血本无归；
+    5. HP 兜底（血线赌战斗）；6. 硬着头皮选第一个可选卡。
+    """
+    feas = [i for i, o in enumerate(options) if o.get("interactable")]
+    if not feas:
+        raise ValueError("宝箱没有可选卡")
+
+    def cost(o: dict, kind: str) -> int:
+        return int(o.get(f"{kind}_cost", 0) or 0)
+
+    def by_kind(kind: str) -> list[int]:
+        return [i for i in feas if options[i].get("kind") == kind]
+
+    for i in by_kind("hp"):
+        if led.hp_lost_pct + cost(options[i], "hp") <= 60:
+            return i
+    for i in by_kind("erosion"):
+        if led.erosion + cost(options[i], "erosion") < led.erosion_safe:
+            return i
+    for i in by_kind("erosion"):
+        if led.erosion + cost(options[i], "erosion") < 100:
+            return i
+    if by_kind("key"):
+        return by_kind("key")[0]
+    if by_kind("hp"):
+        return by_kind("hp")[0]
+    return feas[0]
+
+
 # ---- Boss 后票决策 ------------------------------------------------------------
 
 def ticket_decision(led: AbyssLedger) -> str:

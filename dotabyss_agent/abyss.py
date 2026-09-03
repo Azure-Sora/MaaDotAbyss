@@ -170,7 +170,7 @@ def resolve_room(device, room: Candidate, led: AbyssLedger, brain, log=print) ->
     elif room.type == "event":
         _resolve_event(device, led, brain, log)
     elif room.type == "treasure":
-        _open_treasure(device, log)
+        _open_treasure(device, led, brain, log)
     elif room.type == "shop":
         _close_shop(device, log)
     time.sleep(PACING)
@@ -995,20 +995,126 @@ def _close_shop(device, log=print) -> None:
     _close_overlay(device, log=log)
 
 
-def _open_treasure(device, log=print) -> None:
-    """宝箱房（收益垃圾）：先试 X 不开离开；被迫开则选 浸食+40（绝不 HP/钥匙）。"""
-    tree = device.ui_tree(max_nodes=30000)
-    if _overlay_close_btn(tree):
-        _close_overlay(device, log=log)
-        log("  宝箱 X 离开")
-        return
-    if _click_text_center(device, tree, "浸食", log=log):   # 浸食+40 选项
-        time.sleep(0.6)
-        tree2 = device.ui_tree(max_nodes=30000)
-        if not _click_text_center(device, tree2, "確定", log=log):
-            device.click_ui(639, 651)
-        return
-    _close_overlay(device, log=log)   # 射线右上角兜底已并入通用关闭
+def _collect_treasure_options(tree) -> tuple[list[dict], dict]:
+    """宝箱弹窗三卡（Popup_NetherTreasure/Anim/Contnet/Select/{Key,Hp,Abyss}，Contnet
+    是游戏内拼写）→ (options, btn_map)。kind=key/hp/erosion，代价数字从卡内文本提取
+    （'HP-40%'/'浸食+40'/Value'-1'），读不到按 9999 保守（只会沦为最后兜底）。"""
+    popup = next((n for n in _walk_all(tree)
+                  if n["name"].startswith("Popup_NetherTreasure")), None)
+    if popup is None:
+        return [], {}
+    kind_map = {"key": "key", "hp": "hp", "abyss": "erosion"}
+    sel = next((n for n in _walk_node(popup)
+                if n.get("name") == "Select"
+                and any(c.get("name", "").lower() in kind_map
+                        for c in n.get("children", []))), None)
+    if sel is None:
+        return [], {}
+    options, btn_map = [], {}
+    for node in sel.get("children", []):
+        kind = kind_map.get(node.get("name", "").lower())
+        btn = next((x.get("button") for x in _walk_node(node) if x.get("button")), None)
+        if kind is None or btn is None:
+            continue
+        blob = "".join(x.get("text") or "" for x in _walk_node(node) if x.get("text"))
+        m = re.search(r"(\d+)", blob)
+        n = int(m.group(1)) if m else 9999
+        options.append({"kind": kind,
+                        "key_cost": n if kind == "key" else 0,
+                        "hp_cost": n if kind == "hp" else 0,
+                        "erosion_cost": n if kind == "erosion" else 0,
+                        "interactable": bool(btn.get("interactable"))})
+        btn_map[kind] = btn["path"]
+    return options, btn_map
+
+
+def _open_treasure(device, led, brain, log=print) -> None:
+    """宝箱房（2026-09-03 实测改约）：开箱方式三选一是必答题——旧版先点 X 离开不可行，
+    X 关掉弹窗但房不完成，Front 层候选全锁且弹窗不重弹（候选 0 卡死，现场复现）。
+    流程：等弹窗选项卡挂全 → 规划器选卡 → 確定 → 排空开箱结算回图。"""
+    from .abyss_plan import pick_treasure
+    options, btn_map = [], {}
+    for _ in range(10):                       # 入场动画：弹窗/卡片延迟挂出
+        tree = device.ui_tree(max_nodes=30000)
+        options, btn_map = _collect_treasure_options(tree)
+        if options:
+            break
+        time.sleep(1.0)
+    if not options:
+        raise RuntimeError("宝箱弹窗未挂出选项卡——需人工")
+    log("  [宝箱] " + "；".join(
+        f"{o['kind']}-{o['key_cost'] + o['hp_cost'] + o['erosion_cost']}"
+        + ("" if o["interactable"] else "×不可选") for o in options))
+    k = pick_treasure(options, led)
+    o = options[k]
+    device.click_by_path(btn_map[o["kind"]])
+    log(f"  宝箱选卡 → {o['kind']}")
+    time.sleep(0.8)
+    cf = None
+    for _ in range(6):                        # 选中后確定才亮（动画延迟）
+        tree = device.ui_tree(max_nodes=30000)
+        cf = next((n["button"] for n in _walk_all(tree)
+                   if n.get("button")
+                   and n["button"]["path"].endswith(
+                       "Popup_NetherTreasure(Clone)/Anim/ButtonSet/Button_Confirm")),
+                  None)
+        if cf and cf.get("interactable"):
+            break
+        time.sleep(1.0)
+    if not (cf and cf.get("interactable")):
+        raise RuntimeError("宝箱確定未亮——选卡未生效，需人工")
+    device.click_by_path(cf["path"])
+    log("  宝箱確定")
+    if o["kind"] == "hp":
+        led.hp_lost_pct += o["hp_cost"]
+    elif o["kind"] == "erosion":
+        led.erosion += o["erosion_cost"]      # HUD 对账会以实测回填
+    else:
+        led.getkeys = max(0, led.getkeys - o["key_cost"])
+    # 开箱结算：宝箱浮层（確認して次へ 全屏层）/获得页逐个排空，直到干净地图
+    clean = 0
+    for _ in range(30):
+        time.sleep(2.0)
+        if _scene(device) != "Nether":
+            clean = 0
+            continue
+        tree = device.ui_tree(max_nodes=30000)
+        if any(n["name"].startswith("Popup_NetherTreasure") for n in _walk_all(tree)):
+            clean = 0
+            full = next((n["button"] for n in _walk_all(tree)
+                         if n.get("button") and n["name"] == "FullScreenButton"
+                         and n["button"].get("interactable")
+                         and "Popup_NetherTreasure" in n["button"].get("path", "")), None)
+            if full:
+                device.click_by_path(full["path"])
+                log("  宝箱確認して次へ")
+            continue
+        if _code_popup_present(tree) or _overlay_present(tree) or _overlay_popup_open(tree):
+            _result_step(device, led, brain, log=log, tree=tree)
+            clean = 0
+            continue
+        clean += 1
+        if clean >= 2:
+            return
+    raise RuntimeError("宝箱確定后 1 分钟未回干净地图——需人工")
+
+
+def _reopen_locked_room(device, led, brain, tree, log=print) -> bool:
+    """地图全锁且无任何弹窗=当前房未完成（2026-09-03 宝箱 X 卡死实测：Front 层候选
+    全灰、弹窗不重弹，唯一活口是 Back 层当前房按钮仍 interactable）。点它重拉弹窗；
+    宝箱弹窗出现则就地解决，其他弹窗交回调用方循环。返回是否采取了动作。"""
+    btns = [n["button"] for n in _walk_all(tree)
+            if n.get("button") and n["button"].get("interactable")
+            and "MapFloor_" in n["button"].get("path", "")]
+    if len(btns) != 1:
+        return False
+    device.click_by_path(btns[0]["path"])
+    log(f"  [自救] 地图全锁——重进当前房 {btns[0]['path'][-42:]}")
+    time.sleep(2.0)
+    tree2 = device.ui_tree(max_nodes=30000)
+    if any(n["name"].startswith("Popup_NetherTreasure") for n in _walk_all(tree2)):
+        _open_treasure(device, led, brain, log=log)
+    return True
 
 
 def _multipliers(tree) -> list[str]:
@@ -1407,6 +1513,8 @@ def run_to_floor(device, led: AbyssLedger, brain=None, log=print,
             elif _event_overlay_present(tree):
                 log("  [兜底] 事件覆盖层遗留，重新处理")
                 _resolve_event(device, led, brain, log=log)
+            elif _reopen_locked_room(device, led, brain, tree, log=log):
+                log("  [兜底] 当前房未完成导致锁图，已重进解决")
             time.sleep(3.0)
         if not cands:
             return {"status": "no_candidates", "floor": led.floor, "rooms": rooms}

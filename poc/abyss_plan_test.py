@@ -6,8 +6,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dotabyss_agent.abyss_plan import (
     AbyssLedger, Candidate, effective_erosion_cost, erosion_step, event_score,
-    parse_event_desc, pick_code, pick_event, pick_heal, pick_room, room_value,
-    ticket_decision,
+    parse_event_desc, pick_code, pick_event, pick_heal, pick_room, pick_treasure,
+    room_value, ticket_decision,
 )
 
 
@@ -133,6 +133,39 @@ p = parse_event_desc("<color=#4cf37b>アビスコイン30獲得</color>")
 assert not p["code_gain"] and not p["item_gain"]
 p = parse_event_desc("<color=#4cf37b>アイテム獲得</color>")
 assert p["item_gain"], "物品判定不再依赖串入的 locked『選択』字样"
+
+# ---- 宝箱三选一（2026-09-03 改约：必答题，X 离开会锁死地图） ----
+# 卡片模型：key=消耗钥匙/hp=HP-40%/erosion=浸食+40
+tk_key = {"kind": "key", "key_cost": 1, "interactable": True}
+tk_hp = {"kind": "hp", "hp_cost": 40, "interactable": True}
+tk_er = {"kind": "erosion", "erosion_cost": 40, "interactable": True}
+# 新鲜 HP + 低侵蚀 → HP（可再生成本，永久代价能省则省）
+assert pick_treasure([tk_key, tk_hp, tk_er], led(erosion=5)) == 1
+# HP 不新鲜（战后吃过事件扣血）→ 换侵蚀（安全线内）
+assert pick_treasure([tk_key, tk_hp, tk_er], led(erosion=5, hp_lost_pct=30)) == 2
+# 侵蚀 45：HP 新鲜仍选 HP（40 不越安全线也轮不到侵蚀贴线）
+assert pick_treasure([tk_key, tk_hp, tk_er], led(erosion=45)) == 1
+# 侵蚀 45 + HP 不新鲜 → 侵蚀越安防线但 <100，回复房兜底
+assert pick_treasure([tk_key, tk_hp, tk_er], led(erosion=45, hp_lost_pct=30)) == 2
+# 侵蚀 70 + HP 不新鲜 → 侵蚀=当场暴毙(110)，烧钥匙续行票
+assert pick_treasure([tk_key, tk_hp, tk_er], led(erosion=70, hp_lost_pct=30)) == 0
+# 侵蚀 70 + HP 新鲜 → HP（绝不主动越安防线）
+assert pick_treasure([tk_key, tk_hp, tk_er], led(erosion=70)) == 1
+# 钥匙为 0（不可选）时跳过 key 卡
+tk_key0 = {"kind": "key", "key_cost": 1, "interactable": False}
+assert pick_treasure([tk_key0, tk_hp, tk_er], led(erosion=5)) == 1
+# 只剩钥匙可选（HP/侵蚀全灰的假想异常态）→ 用钥匙
+assert pick_treasure([tk_key, tk_hp, tk_er], led(erosion=5)) is not None
+opts_only_key = [{"kind": "key", "key_cost": 1, "interactable": True},
+                 {"kind": "hp", "hp_cost": 40, "interactable": False},
+                 {"kind": "erosion", "erosion_cost": 40, "interactable": False}]
+assert pick_treasure(opts_only_key, led(erosion=5)) == 0
+# 全不可选 → 报错
+try:
+    pick_treasure([{"kind": "hp", "hp_cost": 40, "interactable": False}], led())
+    assert False, "全不可选应报错"
+except ValueError:
+    pass
 
 # ---- 票决策 ----
 assert ticket_decision(led(floor=21, target_floor=30)) == "continue"
