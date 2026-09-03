@@ -9,6 +9,7 @@
 - buff 四色：impact=黄 / rush=红 / safe=蓝 / risk=紫；冲突对 黄红、蓝紫（同持互减计数）。
 - 结算：帰還する=打到底=全额；暴毙（HP 归零/侵蚀 100）血本无归 → 一切从保守。
 """
+import re
 from dataclasses import dataclass, field
 
 # 四色（游戏内组名：インパクト/ラッシュ/セーフ/リスク）
@@ -84,6 +85,10 @@ def room_value(c: Candidate, led: AbyssLedger) -> float:
             v = 50.0
         else:
             v = 2.0
+    elif c.type == "event" and led.erosion >= led.erosion_safe - 20:
+        # 高侵蚀时事件房降权：事件强制选一项，常含侵蚀/扣血代价（41F 事故：
+        # 侵蚀 60 仍进事件房连吃 +20）。此区间战斗/回复优先，事件让位。
+        v = min(v, 2.0)
     return v
 
 
@@ -134,6 +139,53 @@ def pick_heal(led: AbyssLedger) -> str:
 
 # ---- 事件拍板 ----------------------------------------------------------------
 
+# 效果文案解析不出侵蚀数字时的保守估计（宝箱浸食+40 同档；41F 事故教训：
+# 「浸食率20上昇」行被读取层漏掉 → 侵蚀代价被当 0，高侵蚀时照选直接爆线）。
+UNKNOWN_EROSION_COST = 40
+
+_RICH_TAG = re.compile(r"<[^>]+>")
+_HALF_FULL = {"％": "%"}   # 实测 'HP20％回復'（全角）与 'HP40%減少'（半角）并存
+
+
+def parse_event_desc(desc: str) -> dict:
+    """事件效果标签 → 结构化代价/收益（纯函数，可单测）。
+
+    树文本自带 rich text 颜色标签（数字常被标签包着），先剥离再匹配。
+    含「浸食」关键词却解析不出任何侵蚀数字 → erosion_unknown=True（文案变体
+    如「浸食率がMAXまで上昇」），调用方必须按 UNKNOWN_EROSION_COST 保守处理，
+    绝不可当 0。
+    """
+    d = _RICH_TAG.sub("", desc)
+    for k, v in _HALF_FULL.items():
+        d = d.replace(k, v)
+    m = re.search(r"浸食率\s*(\d+)\s*上昇", d)
+    ec = int(m.group(1)) if m else 0
+    m = re.search(r"浸食率\s*(\d+)\s*減少", d)
+    eg = int(m.group(1)) if m else 0
+    m = re.search(r"HP\s*(\d+)\s*%?\s*減少", d)
+    hp = int(m.group(1)) if m else 0
+    m = re.search(r"HP\s*(\d+)\s*%?\s*回復", d)
+    hp_gain = int(m.group(1)) if m else 0
+    m = re.search(r"(\d+)\s*個消費", d)
+    coin = int(m.group(1)) if m else 0
+    return {
+        "hp_cost": hp, "hp_gain": hp_gain,
+        "erosion_cost": ec, "erosion_gain": eg, "coin_cost": coin,
+        # 'アビスコイン30獲得' 含「コ」但不含「コード」——不可用 'コ' in d 判拿码
+        "code_gain": "コード" in d and "獲得" in d,
+        "item_gain": "アイテム獲得" in d,
+        "erosion_unknown": ("浸食" in d) and not ec and not eg,
+    }
+
+
+def effective_erosion_cost(o: dict) -> int:
+    """侵蚀代价的保守视图：unknown 按 UNKNOWN_EROSION_COST 计，负值当 0。"""
+    c = int(o.get("erosion_cost", 0) or 0)
+    if o.get("erosion_unknown") and c <= 0:
+        return UNKNOWN_EROSION_COST
+    return max(0, c)
+
+
 def event_score(o: dict, led: AbyssLedger) -> float:
     """事件选项打分（pick_event 内部用；锁定了 HP/侵蚀硬约束后也可单独比较选项）。"""
     s = 0.0
@@ -141,9 +193,11 @@ def event_score(o: dict, led: AbyssLedger) -> float:
         s += 100.0
     if o.get("item_gain"):
         s += 40.0
+    if o.get("hp_gain"):
+        s += 0.5 * o["hp_gain"]
     if o.get("erosion_gain"):
         s += 30.0 + o["erosion_gain"]
-    s -= 2.0 * o.get("erosion_cost", 0)
+    s -= 2.0 * effective_erosion_cost(o)
     s -= 0.5 * o.get("coin_cost", 0)
     return s
 
@@ -152,25 +206,35 @@ def pick_event(options: list[dict], led: AbyssLedger) -> int:
     """事件必须选一项（X 不可跳过）。返回选项下标。
 
     options: [{"hp_cost": 扣血%, "erosion_cost": 侵蚀+, "erosion_gain": 侵蚀-,
-               "code_gain": bool, "item_gain": bool, "coin_cost": int}]
-    两级过滤：
+               "hp_gain": 回血%, "code_gain": bool, "item_gain": bool,
+               "coin_cost": int, "erosion_unknown": bool}]
+    三级过滤（2026-09-03 收紧——41F 侵蚀 60 时连选两个 +侵蚀事件直接爆线）：
     - HP 代价 ≤ 战斗间剩余预算（战斗后清零——战斗基本回满，唯一死法是事件连扣归零）；
-    - 侵蚀投影（当前 − 收益 + 代价）< 100 硬顶（暴毙线，无可协商）。
+    - 侵蚀投影 < 100 硬顶（暴毙线，无可协商）；
+    - 侵蚀安全线：有侵蚀代价的选项，投影 ≥ erosion_safe（默认 80）即不可行——
+      安全线以上只留给「到线回复房价值飙升」的被动兜底，绝不主动吃侵蚀贴线。
+    另：erosion_unknown（效果文案读不懂，如「浸食率がMAXまで上昇」）直接排除——
+    41F 教训：读不懂的卡连收益描述都可能是错的，不做低侵蚀赌博；least-bad 兜底。
     通过过滤后按 event_score 打分；
     全不可行时 least-bad：先保 HP 再看侵蚀（事件强制选择，必须有产出）。
     """
     def projected_erosion(o: dict) -> int:
-        return led.erosion - o.get("erosion_gain", 0) + o.get("erosion_cost", 0)
+        return led.erosion - o.get("erosion_gain", 0) + effective_erosion_cost(o)
+
+    def cost(o: dict) -> int:
+        return effective_erosion_cost(o)
 
     feasible = [i for i, o in enumerate(options)
                 if o.get("hp_cost", 0) <= led.hp_budget_left()
-                and projected_erosion(o) < 100]
+                and projected_erosion(o) < 100
+                and not (cost(o) > 0 and projected_erosion(o) >= led.erosion_safe)
+                and not o.get("erosion_unknown")]
     if feasible:
         return max(feasible, key=lambda i: event_score(options[i], led))
     # 全不可行（逼近死局）：先保 HP 再看侵蚀
     return min(range(len(options)),
                key=lambda i: (options[i].get("hp_cost", 0),
-                              options[i].get("erosion_cost", 0)))
+                              cost(options[i])))
 
 
 # ---- Boss 后票决策 ------------------------------------------------------------

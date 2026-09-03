@@ -5,8 +5,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dotabyss_agent.abyss_plan import (
-    AbyssLedger, Candidate, erosion_step, pick_code, pick_event, pick_heal,
-    pick_room, ticket_decision,
+    AbyssLedger, Candidate, effective_erosion_cost, erosion_step, event_score,
+    parse_event_desc, pick_code, pick_event, pick_heal, pick_room, room_value,
+    ticket_decision,
 )
 
 
@@ -84,6 +85,54 @@ assert pick_event(opts3, l) == 1, "超预算的选项被过滤，选 5% 扣血�
 l = led(hp_lost_pct=30)
 opts4 = [{"hp_cost": 20, "erosion_cost": 0}, {"hp_cost": 40, "erosion_cost": -30}]
 assert pick_event(opts4, l) == 0, "全超预算选 HP 代价最小项"
+
+# ---- 侵蚀安全线（2026-09-03 收紧：41F 侵蚀60 连吃两个 +侵蚀事件爆线事故） ----
+# 41F 事故场景复现：侵蚀 60 时 +20 拿码选项，投影 80 触安全线 → 拦截
+l = led(erosion=60)
+opts_safe = [{"hp_cost": 0, "erosion_cost": 20, "code_gain": True},
+             {"hp_cost": 0, "erosion_cost": 0}]
+assert pick_event(opts_safe, l) == 1, "投影触安全线(60+20=80)的侵蚀选项应被拦截"
+# 余量内（45+20=65 < 80）仍允许拿收益
+l = led(erosion=45)
+assert pick_event(opts_safe, l) == 0, "安全线余量内拿码选项照常最优"
+
+# unknown 侵蚀代价（文案解析不出数字，如「浸食率がMAXまで上昇」）→ 直接不可行：
+# 41F 教训——读不懂的卡连收益描述都可能是错的，不做低侵蚀赌博
+p = parse_event_desc("浸食率がMAXまで上昇")
+assert p["erosion_unknown"] and effective_erosion_cost(p) == 40, "unknown 按 40 保守"
+l = led(erosion=20)
+opts_unk = [{"hp_cost": 0, "erosion_unknown": True, "item_gain": True},
+            {"hp_cost": 0, "erosion_cost": 0}]
+assert pick_event(opts_unk, l) == 1, "unknown 侵蚀选项任何侵蚀位都不可行"
+
+# 全选项都带侵蚀且触线 → least-bad 选侵蚀代价最小项
+l = led(erosion=85)
+opts5 = [{"hp_cost": 0, "erosion_cost": 30}, {"hp_cost": 0, "erosion_cost": 10}]
+assert pick_event(opts5, l) == 1, "触线死局选侵蚀代价最小项"
+
+# ---- 选房：高侵蚀时事件房降权（事件强制选一项，常含侵蚀/扣血代价） ----
+l = led(erosion=65)
+ev = Candidate("event", 500, 400, 21)
+ba = Candidate("battle", 300, 400, 21)
+assert room_value(ev, l) <= 2.0 < room_value(ba, l), "侵蚀≥safe-20 事件房让位战斗"
+assert pick_room([ev, ba], l).type == "battle", "高侵蚀时优先战斗房"
+l = led(erosion=30)
+assert pick_room([ev, ba], l).type == "event", "低侵蚀时事件房照常优先"
+
+# ---- 事件效果解析（26F/28F 勘探 dump 真实样本，rich 标签剥离） ----
+p = parse_event_desc("<color=#4cf37b>浸食率10減少</color>")
+assert (p["erosion_gain"], p["erosion_unknown"]) == (10, False)
+p = parse_event_desc("<color=#4cf37b>アビスコード獲得</color>\r\n<color=#ff8232>HP40%減少</color>")
+assert p["code_gain"] and p["hp_cost"] == 40
+p = parse_event_desc("<color=#4cf37b>アイテム獲得</color>\r\n<color=#ff8232>浸食率20上昇</color>")
+assert p["item_gain"] and p["erosion_cost"] == 20
+p = parse_event_desc("<color=#ff8232>アビスコイン40個消費</color>\r\n<color=#4cf37b>HP20％回復</color>")
+assert p["coin_cost"] == 40 and p["hp_gain"] == 20, "全角％回復也要命中"
+assert not p["code_gain"], "アビスコイン≠アビスコード，不可误判拿码"
+p = parse_event_desc("<color=#4cf37b>アビスコイン30獲得</color>")
+assert not p["code_gain"] and not p["item_gain"]
+p = parse_event_desc("<color=#4cf37b>アイテム獲得</color>")
+assert p["item_gain"], "物品判定不再依赖串入的 locked『選択』字样"
 
 # ---- 票决策 ----
 assert ticket_decision(led(floor=21, target_floor=30)) == "continue"

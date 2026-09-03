@@ -770,11 +770,79 @@ def _event_overlay_present(tree) -> bool:
     return False
 
 
+def _walk_node(n):
+    yield n
+    for c in n.get("children", []):
+        yield from _walk_node(c)
+
+
+def _is_locked_text(t: str) -> bool:
+    """locked 常驻层文案（与效果行同 screen 叠加，26F/28F 勘探实测）——非效果行。"""
+    return "条件を満たしていないため" in t or "選択できません" in t
+
+
+def _collect_event_options(tree) -> tuple[list[dict], dict]:
+    """从 UI 树收集事件选项卡，返回 (options, btn_map)。
+
+    options: [{"title", "desc", "screen"}]（屏外装饰卡已排除）
+    btn_map: title -> button info dict（selectable 判定/確定用）
+
+    效果行收集规则（2026-09-03 重做，26F/28F 勘探 dump 实锤）：效果文本挂在选项卡
+    Button 子树内；而弹窗外的 HUD/图例/活动倒计时（'MAXまで'）/角色名（'アリシア'）
+    等 Text 节点遍布全树——旧版全树取 Text 按 x 邻域（±20）归组、y 无上界，把这些
+    统统串进 desc（41F 事故 desc 出现 'MAXまでMAX'），真实「浸食率20上昇/HP減少」
+    行反而可能因中心 x 偏出邻域被漏、代价当 0。现按卡子树收集：y 排序拼接；卡子树
+    无效果行（直挂布局，42F 实测）回退 popup 子树内 x 邻域法（限定 popup + y 上界
+    =卡底+60 + y 排序）。
+    """
+    def _subtree_desc(root) -> str:
+        parts = [(c["screen"][1], c["text"])
+                 for c in _walk_node(root)
+                 if c.get("name") == "Text" and c.get("text")
+                 and c.get("screen") and not _is_locked_text(c["text"])]
+        return "".join(t for _, t in sorted(parts))
+
+    popup = next((n for n in _walk_all(tree)
+                  if n["name"].startswith("Popup_NetherEvent")), None)
+    if popup is None:
+        return [], {}
+    popup_nodes = list(_walk_node(popup))
+    cards = []      # (树节点, button dict, title, title screen)
+    for n in popup_nodes:
+        b = n.get("button")
+        if not b:
+            continue
+        tnode = next((c for c in _walk_node(n)
+                      if c.get("name") == "TitleText" and c.get("text")), None)
+        if tnode:
+            cards.append((n, b, tnode.get("text"), tnode.get("screen")))
+    options, btn_map = [], {}
+    for node, b, tt, tscr in cards:
+        if not tscr or tscr[0] < 0:
+            continue            # 屏外装饰卡（x<0）
+        desc = _subtree_desc(node)
+        if not desc:
+            s0, s1 = tscr[0], tscr[2]
+            ytop, ybot = tscr[1], tscr[3] + 60
+            parts = sorted((x["screen"][1], x["text"])
+                           for x in popup_nodes
+                           if x.get("name") == "Text" and x.get("text")
+                           and x.get("screen") and not _is_locked_text(x["text"])
+                           and s0 - 20 <= (x["screen"][0] + x["screen"][2]) / 2 <= s1 + 20
+                           and ytop <= x["screen"][1] <= ybot)
+            desc = "".join(t for _, t in parts)
+        if desc:
+            options.append({"title": tt, "desc": desc, "screen": tscr})
+            btn_map[tt] = b
+    return options, btn_map
+
+
 def _resolve_event(device, led: AbyssLedger, brain, log=print) -> None:
-    """事件房：选项效果标签按正则解析（机械化文案），兜底 LLM；pick_event 拍板。
+    """事件房：选项效果行按卡子树收集 + 正则解析（机械化文案），可疑时 LLM 复读
+    交叉验证；pick_event 拍板（侵蚀安全线硬约束）。
     事件可能连续多轮（31F 实测：第一轮確定后又弹第二轮营地事件），逐轮处理直到
     回图或触发内置战斗。"""
-    from .abyss_plan import pick_event
+    from .abyss_plan import effective_erosion_cost, parse_event_desc, pick_event
 
     def one_round(tree) -> None:
         def _event_btn(name):
@@ -784,80 +852,87 @@ def _resolve_event(device, led: AbyssLedger, brain, log=print) -> None:
                     return b
             return None
 
-        def wcheck(n):
-            yield n
-            for c in n.get("children", []):
-                yield from wcheck(c)
-
-        def _cards(t):
-            """选项卡 [(button dict, title, title screen)]：popup 子树中「子树含
-            TitleText」的按钮。布局两型（42F 实测）：Choice/Choice_N/Button 与 popup
-            直挂 Button；后者按钮常无 screen 字段，坐标以 TitleText 的为准。"""
-            popup = next((n for n in _walk_all(t)
-                          if n["name"].startswith("Popup_NetherEvent")), None)
-            if popup is None:
-                return []
-            out = []
-            for n in wcheck(popup):
-                b = n.get("button")
-                if not b:
-                    continue
-                tnode = next((c for c in wcheck(n)
-                              if c.get("name") == "TitleText" and c.get("text")), None)
-                if tnode:
-                    out.append((b, tnode.get("text"), tnode.get("screen")))
-            return out
-
         # 覆盖层入场动画期选项卡/按钮未挂全（42F 实测空表被误判死局），等就绪
         for _ in range(8):
-            if sum(1 for _b, _tt, tscr in _cards(tree)
-                   if tscr and tscr[0] >= 0) >= 2:
+            probe_opts, _ = _collect_event_options(tree)
+            if len([o for o in probe_opts if o["screen"][0] >= 0]) >= 2:
                 break
             time.sleep(1.0)
             tree = device.ui_tree(max_nodes=30000)
-        # 选项卡 = TitleText（标题）+ 同级 Text（效果标签），同 x 邻域归组
-        titles = [n for n in _walk_all(tree) if n["name"] == "TitleText" and n.get("text")]
-        texts = [n for n in _walk_all(tree) if n["name"] == "Text" and n.get("text")]
-        options = []
-        for t in titles:
-            if t["name"] != "TitleText" or not t.get("screen"):
-                continue
-            s0, s1 = t["screen"][0], t["screen"][2]   # 标题框即卡宽（防跨卡串文）
-            desc = ""
-            for x in texts:
-                if not x.get("screen"):
-                    continue
-                xx = (x["screen"][0] + x["screen"][2]) / 2
-                if s0 - 20 <= xx <= s1 + 20 and x["screen"][1] >= t["screen"][1]:
-                    desc += x["text"]
-            if desc:
-                options.append({"title": t["text"], "desc": desc, "screen": t["screen"]})
+        options, btn_map = _collect_event_options(tree)
         if not options:
             raise RuntimeError("事件房未找到选项卡")
 
-        def parse(o):
-            d = o["desc"]
-            m = re.search(r"浸食率\s*(\d+)\s*上昇", d)
-            ec = int(m.group(1)) if m else 0
-            m = re.search(r"浸食率\s*(\d+)\s*減少|浸食率\s*減少\s*(\d+)", d)
-            eg = int(m.group(1) or m.group(2) or 0) if m else 0
-            m = re.search(r"HP.*?(\d+)%\s*減少", d)
-            hp = int(m.group(1)) if m else 0
-            m = re.search(r"(\d+)\s*個消費", d)
-            coin = int(m.group(1)) if m else 0
-            return {"hp_cost": hp, "erosion_cost": ec, "erosion_gain": eg,
-                    "coin_cost": coin,
-                    "code_gain": "コード" in d and "獲得" in d,
-                    "item_gain": "アイテム" in d and "選択" in d}
+        parsed = [parse_event_desc(o["desc"]) for o in options]
+        # LLM 交叉验证（2026-09-03 加固）：效果文案变体多（rich 标签/省略写法），
+        # 树读出现 unknown、或高侵蚀区存在带侵蚀代价的选项时，截图让模型逐卡复读。
+        # 合并原则=代价取较大、收益取 LLM 值——一切从保守（暴毙血本无归）。
+        risky = (any(p["erosion_unknown"] for p in parsed)
+                 or (led.erosion >= led.erosion_safe - 20
+                     and any(effective_erosion_cost(p) > 0 for p in parsed)))
+        if brain is not None and risky:
+            try:
+                frame = device.screenshot()
+                titles_line = "、".join(o["title"] for o in options)
+                data = brain.read_json_from_image(
+                    frame,
+                    "这是深渊事件弹窗截图，选项卡标题从左到右：" + titles_line + "。"
+                    "逐个读出每个选项卡内标注的效果行（绿=收益/橙=代价）。只输出 JSON："
+                    '{"options": [{"title": "标题", "hp_cost": 0, "erosion_cost": 0, '
+                    '"erosion_gain": 0, "hp_gain": 0, "coin_cost": 0, '
+                    '"code_gain": false, "item_gain": false}]}；数值没有就填 0，'
+                    "布尔没有就填 false，不要漏掉任何一张卡。",
+                    scene="abyss_event")
+                by_title = {str(x.get("title", "")).strip(): x
+                            for x in data.get("options", []) if isinstance(x, dict)}
+                n_hit = 0
+                for o, p in zip(options, parsed):
+                    j = by_title.get(o["title"])
+                    if not j:
+                        continue
+                    n_hit += 1
+                    p["erosion_cost"] = max(p["erosion_cost"], int(j.get("erosion_cost") or 0))
+                    p["hp_cost"] = max(p["hp_cost"], int(j.get("hp_cost") or 0))
+                    p["coin_cost"] = max(p["coin_cost"], int(j.get("coin_cost") or 0))
+                    p["erosion_gain"] = int(j.get("erosion_gain") or 0) or p["erosion_gain"]
+                    p["hp_gain"] = int(j.get("hp_gain") or 0) or p["hp_gain"]
+                    p["code_gain"] = bool(p["code_gain"] or j.get("code_gain"))
+                    p["item_gain"] = bool(p["item_gain"] or j.get("item_gain"))
+                    if p["erosion_unknown"] and (p["erosion_cost"] or p["erosion_gain"]):
+                        p["erosion_unknown"] = False
+                log(f"  [事件] LLM 复读 {n_hit}/{len(options)} 卡，代价取并集较大值")
+            except Exception as e:
+                log(f"  [事件] LLM 复读失败（{e.__class__.__name__}）——按树读保守值决策")
+
+        def _p_summary(p: dict) -> str:
+            seg = []
+            if p["hp_cost"]:
+                seg.append(f"HP-{p['hp_cost']}%")
+            if p["hp_gain"]:
+                seg.append(f"HP+{p['hp_gain']}%")
+            if p["erosion_cost"]:
+                seg.append(f"侵+{p['erosion_cost']}")
+            if p["erosion_gain"]:
+                seg.append(f"侵-{p['erosion_gain']}")
+            if p["erosion_unknown"]:
+                seg.append("侵?未知")
+            if p["coin_cost"]:
+                seg.append(f"币-{p['coin_cost']}")
+            if p["code_gain"]:
+                seg.append("码")
+            if p["item_gain"]:
+                seg.append("物")
+            return "+".join(seg) or "无效果"
+
+        log("  [事件解析] " + "；".join(
+            f"『{o['title']}』{_p_summary(p)}" for o, p in zip(options, parsed)))
 
         # 选项可选性 = 选项卡按钮 interactable（42F 实测）：文案「条件を満たしていない/
         # 選択できません」不代表不可选——按钮活即可选，確定会亮、效果照常发生。事件是
         # 必答题：进房后不能横走/后退，X 关闭会自动重弹、地图锁死到选完为止，唯一出路
         # 是完成一个可选选项。文案 locked 判定弃用。屏外装饰卡（x<0）排除。
-        parsed = [parse(o) for o in options]
-        cards = {tt: (b, tscr) for b, tt, tscr in _cards(tree)}
         for o in options:
-            b, _tscr = cards.get(o["title"], (None, None))
+            b = btn_map.get(o["title"])
             o["selectable"] = bool(b and b.get("interactable")
                                    and o["screen"] and o["screen"][0] >= 0)
         order = sorted((k for k, o in enumerate(options) if o["selectable"]),
@@ -867,7 +942,7 @@ def _resolve_event(device, led: AbyssLedger, brain, log=print) -> None:
         confirmed = False
         for k in order:
             o = options[k]
-            log(f"  事件『{o['title']}』效果={o['desc'][:40]!r}")
+            log(f"  事件『{o['title']}』效果={parsed[k]!r}")
             if not _click_text_center(device, tree, o["title"], log=log):
                 continue
             time.sleep(0.6)
@@ -880,9 +955,9 @@ def _resolve_event(device, led: AbyssLedger, brain, log=print) -> None:
             log("  確定未亮，换下一个可选选项")
         if not confirmed:
             raise RuntimeError("事件没有任何可確定的选项——需人工")
-        p = parse(o)
+        p = parsed[k]   # k 即确认选项在 options/parsed 中的下标
         led.hp_lost_pct += p["hp_cost"]
-        led.erosion = max(0, led.erosion - p["erosion_gain"] + p["erosion_cost"])
+        led.erosion = max(0, led.erosion - p["erosion_gain"] + effective_erosion_cost(p))
         led.coins = max(0, led.coins - p["coin_cost"])
         # 事件可能触发内置特殊战斗（野兽类，实测 2026-08-30）：等它打完并走完整结算流
         # （QUEST CLEAR→代码弹窗/報酬→回图）；也可能直接弹下一轮事件（31F 实测）或干净
