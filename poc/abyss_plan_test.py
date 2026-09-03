@@ -12,7 +12,7 @@ from dotabyss_agent.abyss_plan import (
 
 
 def led(**kw) -> AbyssLedger:
-    base = dict(floor=21, erosion=10, getkeys=120, coins=50,
+    base = dict(floor=21, erosion=10, keys=120, coins=50,
                 quota={"impact": 3, "rush": 0, "safe": 6, "risk": 0},
                 target_floor=30)
     base.update(kw)
@@ -135,27 +135,29 @@ p = parse_event_desc("<color=#4cf37b>アイテム獲得</color>")
 assert p["item_gain"], "物品判定不再依赖串入的 locked『選択』字样"
 
 # ---- 宝箱三选一（2026-09-03 改约：必答题，X 离开会锁死地图） ----
-# 卡片模型：key=消耗钥匙/hp=HP-40%/erosion=浸食+40
+# 卡片模型：key=消耗宝箱钥匙/hp=HP-40%/erosion=浸食+40
+# 用户指认（2026-09-03）：宝箱钥匙是局内通货（结算即废），与续关継続券是两种东西
+# → 有钥匙必第一顺位用钥匙，HP/侵蚀零代价
 tk_key = {"kind": "key", "key_cost": 1, "interactable": True}
 tk_hp = {"kind": "hp", "hp_cost": 40, "interactable": True}
 tk_er = {"kind": "erosion", "erosion_cost": 40, "interactable": True}
-# 新鲜 HP + 低侵蚀 → HP（可再生成本，永久代价能省则省）
-assert pick_treasure([tk_key, tk_hp, tk_er], led(erosion=5)) == 1
-# HP 不新鲜（战后吃过事件扣血）→ 换侵蚀（安全线内）
-assert pick_treasure([tk_key, tk_hp, tk_er], led(erosion=5, hp_lost_pct=30)) == 2
-# 侵蚀 45：HP 新鲜仍选 HP（40 不越安全线也轮不到侵蚀贴线）
-assert pick_treasure([tk_key, tk_hp, tk_er], led(erosion=45)) == 1
-# 侵蚀 45 + HP 不新鲜 → 侵蚀越安防线但 <100，回复房兜底
-assert pick_treasure([tk_key, tk_hp, tk_er], led(erosion=45, hp_lost_pct=30)) == 2
-# 侵蚀 70 + HP 不新鲜 → 侵蚀=当场暴毙(110)，烧钥匙续行票
-assert pick_treasure([tk_key, tk_hp, tk_er], led(erosion=70, hp_lost_pct=30)) == 0
-# 侵蚀 70 + HP 新鲜 → HP（绝不主动越安防线）
-assert pick_treasure([tk_key, tk_hp, tk_er], led(erosion=70)) == 1
-# 钥匙为 0（不可选）时跳过 key 卡
+assert pick_treasure([tk_key, tk_hp, tk_er], led(erosion=5)) == 0, "有钥匙无脑用钥匙"
+assert pick_treasure([tk_key, tk_hp, tk_er], led(erosion=70)) == 0, "高侵蚀有钥匙也是钥匙"
+assert pick_treasure([tk_key, tk_hp, tk_er], led(erosion=70, hp_lost_pct=50)) == 0
+# 钥匙为 0（不可选）时按 HP/侵蚀止损链
 tk_key0 = {"kind": "key", "key_cost": 1, "interactable": False}
-assert pick_treasure([tk_key0, tk_hp, tk_er], led(erosion=5)) == 1
+assert pick_treasure([tk_key0, tk_hp, tk_er], led(erosion=5)) == 1, "无钥匙+新鲜HP → HP"
+assert pick_treasure([tk_key0, tk_hp, tk_er], led(erosion=5, hp_lost_pct=30)) == 2, \
+    "无钥匙+HP不新鲜 → 侵蚀(安全线内)"
+assert pick_treasure([tk_key0, tk_hp, tk_er], led(erosion=45)) == 1, \
+    "无钥匙+侵蚀45+新鲜HP → 仍 HP（侵蚀能省则省）"
+assert pick_treasure([tk_key0, tk_hp, tk_er], led(erosion=45, hp_lost_pct=30)) == 2, \
+    "无钥匙+侵蚀45+HP不新鲜 → 侵蚀越线但<100，回复房兜底"
+assert pick_treasure([tk_key0, tk_hp, tk_er], led(erosion=70, hp_lost_pct=30)) == 1, \
+    "无钥匙+侵蚀70+HP不新鲜 → 侵蚀=暴毙，只能血线赌战斗"
+assert pick_treasure([tk_key0, tk_hp, tk_er], led(erosion=70)) == 1, \
+    "无钥匙+侵蚀70+新鲜HP → HP（绝不主动越安防线）"
 # 只剩钥匙可选（HP/侵蚀全灰的假想异常态）→ 用钥匙
-assert pick_treasure([tk_key, tk_hp, tk_er], led(erosion=5)) is not None
 opts_only_key = [{"kind": "key", "key_cost": 1, "interactable": True},
                  {"kind": "hp", "hp_cost": 40, "interactable": False},
                  {"kind": "erosion", "erosion_cost": 40, "interactable": False}]

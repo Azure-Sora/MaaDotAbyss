@@ -37,7 +37,7 @@ def main():
     print("[开局] HUD:", hud)
     led = AbyssLedger(
         floor=hud.get("floor", args.start_floor), erosion=hud.get("erosion", 0),
-        getkeys=hud.get("keys", 0), coins=hud.get("coins", 0),
+        keys=hud.get("keys", 0), coins=hud.get("coins", 0),
         quota=quota, target_floor=args.target)
     brain = Brain(provider=args.provider)   # 未知名代码 → 视觉定色入册
     r = run_to_floor(d, led, brain=brain, max_rooms=args.max_rooms, log=print)

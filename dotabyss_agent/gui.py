@@ -996,7 +996,7 @@ class AbyssPage(QWidget):
             log(f"[开局] HUD: {hud}")
             led = AbyssLedger(
                 floor=hud.get("floor", start_floor), erosion=hud.get("erosion", 0),
-                getkeys=hud.get("keys", 0), coins=hud.get("coins", 0),
+                keys=hud.get("keys", 0), coins=hud.get("coins", 0),
                 quota=quota, target_floor=target)
             self._led = led
             brain = Brain(provider=provider)   # 未知名代码 → 视觉定色入册
@@ -1052,7 +1052,7 @@ class AbyssPage(QWidget):
         led = self._led
         if led is None:
             return {}
-        hud_keys = getattr(led, "keys", None)   # reconcile 以 HUD 键名回填，优先于账面 getkeys
+        hud_keys = getattr(led, "keys", None)   # 兼容旧账本对象（字段已统一为 keys）
         return {
             "floor": led.floor, "erosion": led.erosion,
             "keys": led.getkeys if hud_keys is None else hud_keys,

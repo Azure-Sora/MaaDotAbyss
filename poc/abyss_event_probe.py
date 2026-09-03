@@ -196,7 +196,7 @@ def main():
     hud = read_hud(d)
     print("[HUD]", hud)
     led = AbyssLedger(floor=hud.get("floor", args.start_floor), erosion=hud.get("erosion", 0),
-                      getkeys=hud.get("keys", 0), coins=hud.get("coins", 0),
+                      keys=hud.get("keys", 0), coins=hud.get("coins", 0),
                       quota=quota, target_floor=args.target)
 
     if args.mode == "continue":

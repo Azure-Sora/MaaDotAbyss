@@ -1070,7 +1070,7 @@ def _open_treasure(device, led, brain, log=print) -> None:
     elif o["kind"] == "erosion":
         led.erosion += o["erosion_cost"]      # HUD 对账会以实测回填
     else:
-        led.getkeys = max(0, led.getkeys - o["key_cost"])
+        led.keys = max(0, led.keys - o["key_cost"])   # 宝箱钥匙（HUD 对账回填）
     # 开箱结算：宝箱浮层（確認して次へ 全屏层）/获得页逐个排空，直到干净地图
     clean = 0
     for _ in range(30):
@@ -1180,7 +1180,8 @@ def boss_floor_continue(device, led: AbyssLedger, settle: bool, log=print) -> No
         raise RuntimeError(f"倍率不是 1 倍（{mults}）——中止续行，需人工核验")
     if not _click_text_center(device, tree, "使用", log=log):
         raise RuntimeError("倍率弹窗未找到『使用』")
-    led.getkeys = max(0, led.getkeys - 1)
+    # 续关消耗的是継続券，与 HUD 宝箱钥匙（led.keys）无关——不在此扣账
+    # （旧版误扣宝箱钥匙，2026-09-03 用户指认两者是两种东西）
     time.sleep(1.5)
     # 安全箱 → キャンセル
     for attempt in range(6):

@@ -37,8 +37,8 @@ class AbyssLedger:
     """整局账本。er keys coins floor 以 HUD 实测回填；buffs 以拾取事件累加。"""
     floor: int
     erosion: int
-    getkeys: int
-    coins: int
+    keys: int                 # 宝箱钥匙（局内通货，HUD 实测回填）——开宝箱/少量事件选项专用，
+    coins: int                # 与 boss 层续关的継続券是两种东西（用户指认 2026-09-03）
     buffs: dict = field(default_factory=dict)   # color -> count
     quota: dict = field(default_factory=dict)   # color -> 目标数量
     carry_cap: int = 31
@@ -247,12 +247,13 @@ def pick_treasure(options: list[dict], led: AbyssLedger) -> int:
     options: [{"kind": "key"|"hp"|"erosion", "key_cost"/"hp_cost"/"erosion_cost":
                int, "interactable": bool}]，返回选项下标。
     奖励是垃圾（选房权重垫底），本决策纯止损——挑伤最轻的出门方式：
-    1. HP 且战后缓冲够（hp_lost_pct+cost ≤ 60，进下一战 ≥40% 血）——战斗回满，
-       HP 是可再生成本，永久性代价（侵蚀/钥匙）能省则省；
-    2. 侵蚀投影 < 安全线（与事件同规则：绝不主动吃侵蚀贴线）；
-    3. 侵蚀投影 < 100（越线但未暴毙——到线回复房价值飙升，有兜底）；
-    4. 钥匙：只当侵蚀再吃即死时才烧——续行票烧一张=下个 boss 门提前结算，
-       保住已有收益，好过战斗暴毙血本无归；
+    1. 钥匙：局内宝箱钥匙（HUD 实测回填），开宝箱/少量事件选项专用，结算即废；
+       与 boss 层续关的継続券是两种东西（用户指认 2026-09-03）——有就优先烧，
+       HP/侵蚀零代价，白嫖局内通货；
+    2. HP 且战后缓冲够（hp_lost_pct+cost ≤ 60，进下一战 ≥40% 血）——战斗回满，
+       HP 是可再生成本，永久性代价（侵蚀）能省则省；
+    3. 侵蚀投影 < 安全线（与事件同规则：绝不主动吃侵蚀贴线）；
+    4. 侵蚀投影 < 100（越线但未暴毙——到线回复房价值飙升，有兜底）；
     5. HP 兜底（血线赌战斗）；6. 硬着头皮选第一个可选卡。
     """
     feas = [i for i, o in enumerate(options) if o.get("interactable")]
@@ -265,6 +266,9 @@ def pick_treasure(options: list[dict], led: AbyssLedger) -> int:
     def by_kind(kind: str) -> list[int]:
         return [i for i in feas if options[i].get("kind") == kind]
 
+    key_ok = by_kind("key")
+    if key_ok:
+        return key_ok[0]
     for i in by_kind("hp"):
         if led.hp_lost_pct + cost(options[i], "hp") <= 60:
             return i
@@ -274,8 +278,6 @@ def pick_treasure(options: list[dict], led: AbyssLedger) -> int:
     for i in by_kind("erosion"):
         if led.erosion + cost(options[i], "erosion") < 100:
             return i
-    if by_kind("key"):
-        return by_kind("key")[0]
     if by_kind("hp"):
         return by_kind("hp")[0]
     return feas[0]
