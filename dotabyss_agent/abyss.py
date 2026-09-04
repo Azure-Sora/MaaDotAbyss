@@ -119,9 +119,11 @@ def reveal_clipped_candidates(device) -> None:
 
 
 def enter_room(device, room: Candidate, log=print) -> None:
-    """进房：屏内房间用射线式真实点击（部分房间入口只挂指针事件管线，
-    onClick.Invoke 是空操作——实测 2026-08-30）；屏外房间只能按路径 Invoke。
-    点完 3s 内场景/覆盖层必须有反应，否则换法重试一次。"""
+    """进房：屏内房间（含贴边半露房，点击点已裁到可见区）用射线式真实点击
+    （部分房间入口只挂指针事件管线，onClick.Invoke 是空操作——实测 2026-08-30）；
+    全屏外房间只能按路径 Invoke。点完 3s 内场景/覆盖层必须有反应，否则换法重试一次。"""
+    m = re.search(r"MapFloor_\w+?\(Clone\)", room.btn_path or "")
+    room_token = m.group(0) if m else None
     attempts = []
     if room.visible:
         attempts += [("ray", room.x, room.y)]
@@ -136,6 +138,10 @@ def enter_room(device, room: Candidate, log=print) -> None:
                 p = device.click_ui(a, b)
                 if "PullOut" in p or "Retreat" in p:
                     raise RuntimeError(f"射线命中撤退按钮 {p}——立即停止")
+                if room_token and room_token not in p:
+                    # 点中的是别的层（贴边房被边缘 HUD 按钮挡住射线等）：
+                    # 本房多半没收到点击，先记一笔，后续无反应时日志可对上
+                    log(f"  [enter] ray 命中 {p}（非本房 {room_token}）")
             elif kind == "path":
                 device.click_by_path(a)
             else:
@@ -1428,7 +1434,8 @@ def _llm_rescue(device, brain, situation: str, log=print, max_rounds: int = 4) -
             "可点击按钮（✓可点/✗灰，格式 路径｜可见文本）：\n" + "\n".join(rows) +
             "\n目标：关掉当前覆盖层/界面，回到深渊地图。只输出 JSON："
             '{"analysis":"一句话判断","action":"click_path|corner","path":"要点的完整按钮路径,corner 时省略"}\n'
-            "corner=点屏幕左上角跳过无按钮浮层。绝不选含 撤退/PullOut/Retreat 的按钮。"
+            "corner=点屏幕左上角跳过无按钮浮层。绝不选含 撤退/PullOut/Retreat/"
+            "TutorialFocus/Mask/FrameButton 的按钮（遮罩类点了无效甚至跳去别的界面）。"
         )
         try:
             data = brain.ask_json("你是游戏自动化脚本的兜底决策器，只输出一个 JSON 对象。", prompt, scene="abyss_rescue")
@@ -1440,7 +1447,8 @@ def _llm_rescue(device, brain, situation: str, log=print, max_rounds: int = 4) -
         log(f"  [兜底] 第{round_no}轮: {str(data.get('analysis', '?'))[:60]} → {action}")
         try:
             if action == "click_path":
-                if any(k in path for k in ("PullOut", "Retreat")):
+                if any(k in path for k in ("PullOut", "Retreat", "TutorialFocus",
+                                           "Mask", "FrameButton")):
                     raise RuntimeError(f"模型选了禁区按钮 {path}")
                 device.click_by_path(path)
                 if "Popup_" in path and popup_click is None:
@@ -1535,6 +1543,21 @@ def run_to_floor(device, led: AbyssLedger, brain=None, log=print,
         except Exception as e:
             if ZOMBIE_POPUP_MSG in str(e):
                 raise   # 输入已被僵尸弹窗锁死，自救点击全无效，直接停等人工
+            try:
+                tree = device.ui_tree(max_nodes=30000)
+                map_clean = (tree.get("scene") == "Nether"
+                             and not _overlay_popup_open(tree)
+                             and not _overlay_present(tree)
+                             and not _code_popup_present(tree)
+                             and not _event_overlay_present(tree))
+            except Exception:
+                map_clean = False   # 树读不到按不干净处理，交原自救流程止损
+            if map_clean:
+                # 地图本来就干净：进房失败不是「有浮层挡路」，自救的目标（关浮层回图）
+                # 不成立，放它出去只会在按钮表里乱点（52F 实战：见 TutorialFocus 遮罩
+                # 就 Invoke，把界面点回 NetherTop 主页）——直接上报等重试。
+                log(f"  [异常] {e}——地图干净无浮层可关，自救无对象")
+                raise
             log(f"  [异常] {e}——尝试 LLM 自救")
             if not _llm_rescue(device, brain, f"进入/解决 {room.type} 房间", log=log):
                 raise

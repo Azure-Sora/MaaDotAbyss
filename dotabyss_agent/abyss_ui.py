@@ -22,6 +22,8 @@ STAGE_TITLE = {"強敵": "elite", "ボス": "boss", "戦闘": "battle", "回復"
                "イベント": "event", "商店": "shop", "宝箱": "treasure"}
 _FLOOR_RE = re.compile(r"MapFloor_(?:Single|Double|Triple)_(\w+?)\(Clone\)$")
 _ROAD_RE = re.compile(r"MapRoad_(\w+?)\(Clone\)$")
+VIEW_W, VIEW_H = 1280, 720   # 游戏渲染分辨率（doc 13 §2，与截图像素系一致）
+MIN_CLICKABLE = 60           # 可见区最小边长：低于此算屏外（贴边窄条易被边缘 HUD 挡射线）
 
 
 def _walk(n):
@@ -124,8 +126,16 @@ def read_candidates(device, current_floor: int | None = None, log=print) -> list
         if not r["enterable"] or not r["screen"]:
             continue
         x0, y0, x1, y1 = r["screen"]
-        cx, cy = (x0 + x1) // 2, (y0 + y1) // 2
-        visible = -40 <= x0 and x1 <= 1320
+        # 射线点击只要求点中的部分在屏内：贴边房裁到视口、取可见区中心当点击点。
+        # 旧判定要求整矩形入界，半露房被误判屏外 → enter_room 只剩路径 Invoke，
+        # 而部分房间入口 onClick.Invoke 是空操作（只认指针事件管线）→ 进房必败
+        # （2026-09-04 52F 实战：唯一候选贴右缘露大半，Invoke 无反应，手点可进）。
+        vx0, vy0 = max(x0, 0), max(y0, 0)
+        vx1, vy1 = min(x1, VIEW_W), min(y1, VIEW_H)
+        if vx1 - vx0 >= MIN_CLICKABLE and vy1 - vy0 >= MIN_CLICKABLE:
+            visible, cx, cy = True, (vx0 + vx1) // 2, (vy0 + vy1) // 2
+        else:
+            visible, cx, cy = False, (x0 + x1) // 2, (y0 + y1) // 2
         cands.append(Candidate(r["type"], cx, cy, current_floor or -1, visible,
                                r.get("btn_path")))
     order = sorted(range(len(cands)),
